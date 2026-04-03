@@ -73,7 +73,7 @@ centralPortal {
         }
 
         scm {
-            url.set("https://featureflip.io")
+            url.set("https://github.com/canopy-labs/featureflip-android")
         }
     }
 }
