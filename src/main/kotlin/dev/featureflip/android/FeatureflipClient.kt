@@ -1,351 +1,211 @@
 package dev.featureflip.android
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import okhttp3.Call
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
-import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.concurrent.read
-import kotlin.concurrent.write
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Main public API for the Featureflip Android SDK.
  *
  * This is a client-side SDK — flags are evaluated server-side and only the
- * values are returned. Use [initialize] to fetch initial flags, then read
- * values via [boolVariation], [stringVariation], etc.
+ * values are returned. Obtain a client via the static factory [get]; direct
+ * instantiation is not supported. Multiple [get] calls with the same SDK key
+ * return handles sharing one underlying [SharedFeatureflipCore] (refcounted);
+ * the shared core shuts down when the last handle is closed.
+ *
+ * This makes the SDK safe under any lifetime pattern — DI containers, scoped
+ * or transient registration, per-Activity instantiation, etc. all resolve to
+ * one SSE streaming connection and one flag store per client key.
+ *
+ * Call [initialize] to load initial flags and start background workers, then
+ * read values via [boolVariation], [stringVariation], etc. When done, call
+ * [close] to decrement the refcount.
  */
 class FeatureflipClient private constructor(
-    private val config: FeatureflipConfig,
-    private val httpClient: HttpClient,
-    private val cache: FlagCache,
-    private val isTestClient: Boolean,
-    initialFlags: Map<String, FlagValue>,
+    private val core: SharedFeatureflipCore,
 ) {
-    companion object {
-        const val VERSION = "0.1.0"
+    private val disposed = AtomicBoolean(false)
 
-        @Volatile
-        private var instance: FeatureflipClient? = null
-
-        /**
-         * Returns the shared singleton client. Must call [configure] first.
-         */
-        @JvmStatic
-        fun shared(): FeatureflipClient =
-            instance ?: throw IllegalStateException("FeatureflipClient.configure() must be called before shared()")
-
-        /**
-         * Configures the shared singleton client.
-         */
-        @JvmStatic
-        fun configure(config: FeatureflipConfig) {
-            instance = create(config)
-        }
-
-        /**
-         * Creates a new client instance.
-         */
-        @JvmStatic
-        fun create(config: FeatureflipConfig): FeatureflipClient {
-            val httpClient = HttpClient(config.baseUrl, config.clientKey)
-            val cache = FlagCache(config.clientKey)
-            return FeatureflipClient(config, httpClient, cache, isTestClient = false, initialFlags = emptyMap())
-        }
-
-        /**
-         * Creates a new client instance with a custom [Call.Factory] (for testing).
-         */
-        internal fun create(config: FeatureflipConfig, callFactory: Call.Factory): FeatureflipClient {
-            val httpClient = HttpClient(config.baseUrl, config.clientKey, callFactory)
-            val cache = FlagCache(config.clientKey)
-            return FeatureflipClient(config, httpClient, cache, isTestClient = false, initialFlags = emptyMap())
-        }
-
-        /**
-         * Creates a no-network test client with static flag overrides.
-         */
-        @JvmStatic
-        fun forTesting(overrides: Map<String, Any?>): FeatureflipClient {
-            val dummyConfig = FeatureflipConfig(clientKey = "test-key", baseUrl = "https://localhost")
-            val httpClient = HttpClient(dummyConfig.baseUrl, dummyConfig.clientKey)
-            val cache = FlagCache(dummyConfig.clientKey)
-
-            val flags = overrides.mapValues { (_, value) ->
-                FlagValue(value = value, variation = "override", reason = "TEST")
-            }
-
-            return FeatureflipClient(dummyConfig, httpClient, cache, isTestClient = true, initialFlags = flags).also {
-                it.snapshotLock.write { it.flagSnapshot = flags.toMutableMap() }
-                it.lock.write { it._initialized = true }
-            }
-        }
-
-        /**
-         * Resets the singleton (for testing only).
-         */
-        internal fun resetShared() {
-            instance = null
-        }
-    }
-
-    private val snapshotLock = ReentrantReadWriteLock()
-    private var flagSnapshot: MutableMap<String, FlagValue> = initialFlags.toMutableMap()
-
-    private val lock = ReentrantReadWriteLock()
-    private var currentContext: Map<String, String> = config.context
-    private var _initialized = false
-    private var streamingDataSource: StreamingDataSource? = null
-    private var pollingDataSource: PollingDataSource? = null
-    private var lifecycleObserver: LifecycleObserver? = null
-
-    private val backgroundScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
-    private val eventProcessor = EventProcessor(
-        httpClient = httpClient,
-        flushIntervalMs = config.flushIntervalMs,
-        batchSize = config.flushBatchSize,
-    )
-
-    /**
-     * Whether the client has been initialized.
-     */
+    /** Whether the underlying shared core has been initialized. */
     val isInitialized: Boolean
-        get() = lock.read { _initialized }
+        get() = core.isInitialized
 
     /**
-     * Initializes the client: loads disk cache, fetches flags, starts streaming/polling
-     * and lifecycle observer.
+     * Initializes the underlying shared core: loads disk cache, fetches flags,
+     * starts streaming/polling, and registers the lifecycle observer. Safe to
+     * call more than once — the first invocation does the work and subsequent
+     * calls are no-ops. Also safe to call from a handle acquired on an
+     * already-initialized shared core.
      */
     fun initialize() {
-        if (isTestClient) return
-
-        // Load persisted cache
-        cache.loadFromDisk()
-        val cached = cache.all()
-        if (cached.isNotEmpty()) {
-            updateSnapshot(cached)
-        }
-
-        // Fetch initial flags
-        try {
-            val response = httpClient.evaluate(config.context, config.initTimeoutMs)
-            cache.setAll(response.flags)
-            updateSnapshot(response.flags)
-        } catch (_: Exception) {
-            // Use cached flags if available
-        }
-
-        // Start data source
-        startDataSource()
-
-        // Start event processor
-        eventProcessor.start()
-
-        // Start lifecycle observer
-        val observer = LifecycleObserver(
-            onForeground = { handleForeground() },
-            onBackground = { handleBackground() },
-        )
-        lock.write {
-            lifecycleObserver = observer
-            _initialized = true
-        }
+        core.initialize()
     }
 
     /**
-     * Stops streaming/polling and flushes pending events.
+     * Decrements the refcount on the shared core. When the last handle for a
+     * given client key is closed, the shared core stops streaming/polling,
+     * removes the lifecycle observer, flushes events, and removes itself from
+     * the factory cache. Double-close on the same handle is a no-op.
      */
     fun close() {
-        val (stream, poller, observer) = lock.write {
-            val s = streamingDataSource
-            val p = pollingDataSource
-            val o = lifecycleObserver
-            streamingDataSource = null
-            pollingDataSource = null
-            lifecycleObserver = null
-            Triple(s, p, o)
+        if (disposed.compareAndSet(false, true)) {
+            core.release()
         }
-        stream?.stop()
-        poller?.stop()
-        observer?.remove()
-        eventProcessor.stop()
     }
 
     // -- Variation methods --
 
-    /**
-     * Returns a boolean flag value, or [defaultValue] if the flag is missing or not a boolean.
-     */
-    fun boolVariation(key: String, defaultValue: Boolean): Boolean {
-        val flag = getFlag(key) ?: return defaultValue
-        return flag.value as? Boolean ?: defaultValue
-    }
+    fun boolVariation(key: String, defaultValue: Boolean): Boolean =
+        core.boolVariation(key, defaultValue)
 
-    /**
-     * Returns a string flag value, or [defaultValue] if the flag is missing or not a string.
-     */
-    fun stringVariation(key: String, defaultValue: String): String {
-        val flag = getFlag(key) ?: return defaultValue
-        return flag.value as? String ?: defaultValue
-    }
+    fun stringVariation(key: String, defaultValue: String): String =
+        core.stringVariation(key, defaultValue)
 
-    /**
-     * Returns a numeric flag value as Double, or [defaultValue] if the flag is missing or not numeric.
-     */
-    fun numberVariation(key: String, defaultValue: Double): Double {
-        val flag = getFlag(key) ?: return defaultValue
-        return when (val v = flag.value) {
-            is Number -> v.toDouble()
-            else -> defaultValue
+    fun numberVariation(key: String, defaultValue: Double): Double =
+        core.numberVariation(key, defaultValue)
+
+    fun jsonVariation(key: String, defaultValue: Any?): Any? =
+        core.jsonVariation(key, defaultValue)
+
+    // -- Identify / track / flush --
+
+    fun identify(context: Map<String, String>) = core.identify(context)
+
+    fun track(eventName: String, metadata: Map<String, Any?>? = null) =
+        core.track(eventName, metadata)
+
+    fun flush() = core.flush()
+
+    // -- Internal test helpers (package-private access via Kotlin internal) --
+
+    internal fun allFlags(): Map<String, FlagValue> = core.allFlags()
+
+    internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> =
+        core.mergeSnapshot(delta)
+
+    internal fun startDataSource() = core.startDataSource()
+
+    internal fun startPolling() = core.startPolling()
+
+    /** Exposed for tests that simulate lifecycle transitions. */
+    internal val lifecycleObserver: LifecycleObserver?
+        get() = core.lifecycleObserver
+
+    companion object {
+        const val VERSION = "2.0.0"
+
+        /**
+         * Process-wide cache of shared cores keyed by client SDK key. Uses
+         * [ConcurrentHashMap] so concurrent `get()` calls from multiple
+         * threads share one core.
+         */
+        private val liveCores = ConcurrentHashMap<String, SharedFeatureflipCore>()
+
+        /**
+         * Returns a client for the given config. The first call with a given
+         * client key constructs and registers a shared core; subsequent calls
+         * with the same key return a new handle pointing at the cached core.
+         * When the last handle for a key is closed, the core shuts down and
+         * is removed from the cache.
+         *
+         * The [config] is honored only on the first call for a given client
+         * key. Subsequent callers that pass meaningfully different options
+         * (baseUrl, streaming, intervals, timeouts) will see a warning logged
+         * via [System.err]; the cached core's config is preserved.
+         *
+         * Concurrent calls to `get(sameKey)` from multiple threads result in
+         * exactly one core construction — the losing thread's speculative core
+         * is released before being returned.
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun get(config: FeatureflipConfig, callFactory: Call.Factory? = null): FeatureflipClient {
+            require(config.clientKey.isNotBlank()) { "clientKey is required" }
+
+            // Retry loop handles the race where a cached core is found but has
+            // already begun shutting down (refcount hit 0 between lookup and
+            // tryAcquire). Each iteration makes progress: acquire & return,
+            // drop stale entry and retry, or successfully add a new core.
+            while (true) {
+                val existing = liveCores[config.clientKey]
+                if (existing != null) {
+                    if (existing.tryAcquire()) {
+                        if (!configsEqual(existing.config, config)) {
+                            System.err.println(
+                                "[featureflip] FeatureflipClient.get called with different " +
+                                    "options for client key already in use. The cached instance's " +
+                                    "options are preserved; the passed options are ignored.",
+                            )
+                        }
+                        return FeatureflipClient(existing)
+                    }
+                    // Stale entry — core shut down between lookup and acquire.
+                    liveCores.remove(config.clientKey, existing)
+                    continue
+                }
+
+                val newCore = SharedFeatureflipCore.create(config, callFactory)
+                val previous = liveCores.putIfAbsent(config.clientKey, newCore)
+                if (previous == null) {
+                    newCore.setOwningMap(liveCores, config.clientKey)
+                    return FeatureflipClient(newCore)
+                }
+                // Another thread won the race — release our speculative core and retry.
+                newCore.release()
+            }
         }
-    }
 
-    /**
-     * Returns the raw flag value, or [defaultValue] if the flag is missing.
-     */
-    fun jsonVariation(key: String, defaultValue: Any?): Any? {
-        val flag = getFlag(key) ?: return defaultValue
-        return flag.value
-    }
-
-    // -- Identify --
-
-    /**
-     * Re-evaluates flags for a new user context.
-     */
-    fun identify(context: Map<String, String>) {
-        if (isTestClient) {
-            lock.write { currentContext = context }
-            return
+        /**
+         * Creates a no-network test client with static flag overrides. Not
+         * registered in the factory cache — each call returns an independent
+         * instance with its own snapshot and no background workers.
+         */
+        @JvmStatic
+        fun forTesting(overrides: Map<String, Any?>): FeatureflipClient {
+            return FeatureflipClient(SharedFeatureflipCore.createForTesting(overrides))
         }
-        val connectionId = lock.read { streamingDataSource }?.connectionId
-        val response = httpClient.identify(context, connectionId)
-        cache.setAll(response.flags)
-        updateSnapshot(response.flags)
 
-        val (stream, poller) = lock.write {
-            currentContext = context
-            streamingDataSource to pollingDataSource
-        }
-        stream?.updateContext(context)
-        poller?.updateContext(context)
-    }
+        /**
+         * Current number of live shared cores in the factory cache.
+         *
+         * **Diagnostic only** — not part of the stable API surface. Exposed
+         * as `public` so cross-module integration tests can observe factory
+         * state, but may change or be removed in a minor version.
+         */
+        @JvmStatic
+        fun debugLiveCoreCount(): Int = liveCores.size
 
-    // -- Track --
+        /**
+         * Returns the shared core's current refcount for the given client
+         * key, or 0 if no core is cached for that key.
+         *
+         * **Diagnostic only** — not part of the stable API surface. Exposed
+         * as `public` so cross-module integration tests can observe factory
+         * state, but may change or be removed in a minor version.
+         */
+        @JvmStatic
+        fun debugRefCount(clientKey: String): Int =
+            liveCores[clientKey]?.debugRefCount ?: 0
 
-    /**
-     * Enqueues a custom analytics event.
-     */
-    fun track(eventName: String, metadata: Map<String, Any?>? = null) {
-        if (isTestClient) return
-        val userId = lock.read { currentContext["user_id"] }
-        val event = SdkEvent(
-            type = "Custom",
-            flagKey = eventName,
-            userId = userId,
-            timestamp = isoFormat().format(Date()),
-            metadata = metadata,
-        )
-        eventProcessor.enqueue(event)
-    }
-
-    private fun isoFormat(): SimpleDateFormat {
-        return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-    }
-
-    // -- Flush --
-
-    /**
-     * Force-flushes pending analytics events.
-     */
-    fun flush() {
-        if (isTestClient) return
-        eventProcessor.flush()
-    }
-
-    // -- Internal --
-
-    internal fun allFlags(): Map<String, FlagValue> = snapshotLock.read { flagSnapshot.toMap() }
-
-    // -- Private --
-
-    private fun getFlag(key: String): FlagValue? = snapshotLock.read { flagSnapshot[key] }
-
-    private fun updateSnapshot(flags: Map<String, FlagValue>) {
-        snapshotLock.write { flagSnapshot = flags.toMutableMap() }
-    }
-
-    internal fun startDataSource() {
-        val ctx = lock.read { currentContext }
-        if (config.streaming) {
-            val source = StreamingDataSource(
-                baseUrl = config.baseUrl,
-                clientKey = config.clientKey,
-                context = ctx,
-                onChange = { flags -> handleStreamingUpdate(flags) },
-            )
-            source.start()
-            lock.write { streamingDataSource = source }
-        } else {
-            startPolling()
-        }
-    }
-
-    internal fun startPolling() {
-        val ctx = lock.read { currentContext }
-        val source = PollingDataSource(
-            httpClient = httpClient,
-            context = ctx,
-            intervalMs = config.pollIntervalMs,
-            onChange = { flags -> handlePollingUpdate(flags) },
-        )
-        source.start()
-        lock.write { pollingDataSource = source }
-    }
-
-    private fun handleStreamingUpdate(delta: Map<String, FlagValue>) {
-        val merged = mergeSnapshot(delta)
-        cache.setAll(merged)
-    }
-
-    private fun handlePollingUpdate(flags: Map<String, FlagValue>) {
-        updateSnapshot(flags)
-        cache.setAll(flags)
-    }
-
-    internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> {
-        return snapshotLock.write {
-            for ((key, value) in delta) {
-                if (value.reason == "FLAG_REMOVED" && value.value == null) {
-                    flagSnapshot.remove(key)
-                } else {
-                    flagSnapshot[key] = value
+        /**
+         * Resets the factory cache. For test isolation only — forces shutdown
+         * of each currently-cached core. Any handles callers still hold will
+         * become no-ops on [close] (their refcount decrement is absorbed by
+         * the already-shut-down core).
+         *
+         * **Test-only** — not part of the stable API surface. Exposed as
+         * `public` so cross-module integration tests can reset state, but
+         * may change or be removed in a minor version.
+         */
+        @JvmStatic
+        fun resetForTesting() {
+            val cores = liveCores.values.toList()
+            liveCores.clear()
+            for (core in cores) {
+                while (core.debugRefCount > 0 && !core.debugIsShutDown) {
+                    core.release()
                 }
             }
-            flagSnapshot.toMap()
         }
-    }
-
-    private fun handleForeground() {
-        backgroundScope.launch {
-            val (stream, poller) = lock.read { streamingDataSource to pollingDataSource }
-            stream?.start()
-            poller?.start()
-        }
-    }
-
-    private fun handleBackground() {
-        val (stream, poller) = lock.read { streamingDataSource to pollingDataSource }
-        stream?.stop()
-        poller?.stop()
-        backgroundScope.launch { eventProcessor.flush() }
     }
 }

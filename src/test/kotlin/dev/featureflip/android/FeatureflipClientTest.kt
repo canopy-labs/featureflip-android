@@ -24,7 +24,7 @@ class FeatureflipClientTest {
 
     @AfterEach
     fun tearDown() {
-        FeatureflipClient.resetShared()
+        FeatureflipClient.resetForTesting()
         server.close()
     }
 
@@ -139,7 +139,7 @@ class FeatureflipClientTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             streaming = false,
         )
-        val client = FeatureflipClient.create(config)
+        val client = FeatureflipClient.get(config)
 
         client.initialize()
 
@@ -163,7 +163,7 @@ class FeatureflipClientTest {
             streaming = false,
             pollIntervalMs = 60_000,
         )
-        val client = FeatureflipClient.create(config)
+        val client = FeatureflipClient.get(config)
         client.initialize()
 
         assertThat(client.boolVariation("feature", true)).isFalse()
@@ -263,7 +263,7 @@ class FeatureflipClientTest {
             streaming = false,
             pollIntervalMs = 60_000,
         )
-        val client = FeatureflipClient.create(config)
+        val client = FeatureflipClient.get(config)
         client.initialize()
 
         // Enqueue a slow response for the foreground resume poll
@@ -278,10 +278,9 @@ class FeatureflipClientTest {
         // Since handleForeground dispatches via backgroundScope.launch,
         // it should return well before the 500ms server delay
         val start = System.nanoTime()
-        // Access the lifecycle observer via reflection to test the real path
-        val observerField = FeatureflipClient::class.java.getDeclaredField("lifecycleObserver")
-        observerField.isAccessible = true
-        val observer = observerField.get(client) as? LifecycleObserver
+        // Access the lifecycle observer via the handle's internal accessor
+        // (delegates to SharedFeatureflipCore.lifecycleObserver)
+        val observer = client.lifecycleObserver
 
         // Simulate background then foreground
         observer?.simulateBackground()
@@ -309,7 +308,7 @@ class FeatureflipClientTest {
             streaming = false,
             pollIntervalMs = 60_000,
         )
-        val client = FeatureflipClient.create(config)
+        val client = FeatureflipClient.get(config)
         client.initialize()
         client.close()
 
@@ -336,16 +335,4 @@ class FeatureflipClientTest {
         client.close()
     }
 
-    @Test
-    fun `shared throws before configure`() {
-        assertThrows<IllegalStateException> {
-            FeatureflipClient.shared()
-        }
-    }
-
-    @Test
-    fun `configure sets shared instance`() {
-        FeatureflipClient.configure(FeatureflipConfig(clientKey = "key"))
-        assertThat(FeatureflipClient.shared()).isNotNull
-    }
 }

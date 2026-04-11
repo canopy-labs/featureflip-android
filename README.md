@@ -27,7 +27,7 @@ import dev.featureflip.android.FeatureflipClient
 import dev.featureflip.android.FeatureflipConfig
 
 val config = FeatureflipConfig(clientKey = "your-client-sdk-key")
-val client = FeatureflipClient.create(config)
+val client = FeatureflipClient.get(config)
 
 client.initialize()
 
@@ -39,6 +39,8 @@ if (enabled) {
 
 client.close()
 ```
+
+> **Singleton by construction.** `FeatureflipClient.get()` is the only way to obtain a client — the public constructor was removed in v2.0. Calling `get()` more than once with the same `clientKey` returns handles pointing at one shared underlying client (refcounted). This makes the SDK safe to call from per-Activity or per-ViewModel constructors and from DI containers without leaking SSE connections.
 
 ## Configuration
 
@@ -57,11 +59,15 @@ val config = FeatureflipConfig(
 
 ## Singleton Pattern
 
+The factory `FeatureflipClient.get(config)` **is** the singleton pattern — it dedupes by client key across the whole process. Call it anywhere:
+
 ```kotlin
-FeatureflipClient.configure(config)
+// Same underlying shared client, two handles.
+val a = FeatureflipClient.get(config)
+val b = FeatureflipClient.get(config)
 
 // Access from anywhere
-val enabled = FeatureflipClient.shared().boolVariation("my-feature", false)
+val enabled = FeatureflipClient.get(config).boolVariation("my-feature", false)
 ```
 
 ## Evaluation
