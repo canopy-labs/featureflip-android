@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "io.featureflip"
-version = "2.0.0"
+version = "2.1.0"
 
 java {
     toolchain {
@@ -26,16 +26,16 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp-sse:5.3.2")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.21.3")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.21.3")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
 
     // Note: androidx.lifecycle is accessed via reflection at runtime when available.
     // No compile-time dependency needed — the SDK works on both Android and pure JVM.
 
-    testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
+    testImplementation("org.junit.jupiter:junit-jupiter:6.1.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("com.squareup.okhttp3:mockwebserver3-junit5:5.3.2")
     testImplementation("org.assertj:assertj-core:3.27.7")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }
 
 tasks.test {
@@ -45,6 +45,7 @@ tasks.test {
 kotlin {
     compilerOptions {
         freeCompilerArgs.add("-Xjsr305=strict")
+        allWarningsAsErrors.set(true)
     }
 }
 

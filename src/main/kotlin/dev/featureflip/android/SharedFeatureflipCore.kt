@@ -254,7 +254,7 @@ internal class SharedFeatureflipCore private constructor(
         if (isTestClient) return
         val userId = lock.read { currentContext["user_id"] }
         val event = SdkEvent(
-            type = "Custom",
+            type = SdkEventType.Custom,
             flagKey = eventName,
             userId = userId,
             timestamp = isoFormat().format(Date()),

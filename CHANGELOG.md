@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`FlagValue.prerequisiteKey`** — optional `String?` field that surfaces the prerequisite flag that caused this flag to serve its off variation. Populated by the server on `/v1/client/evaluate` and `/v1/client/identify` responses when `reason == "prerequisite-failed"`; `null` otherwise. Decoded from the JSON `prerequisiteKey` field. Serialization omits the field when null (matches the server's wire format and the Swift SDK), so cache files only carry it when meaningful. Pre-existing cache files written by older SDK versions decode cleanly with `prerequisiteKey == null`.
+
 ## 2.0.0 — 2026-04-09
 
 ### BREAKING

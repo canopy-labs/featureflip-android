@@ -84,8 +84,7 @@ internal class HttpClient(
             if (!response.isSuccessful) {
                 throw IOException("HTTP ${response.code}")
             }
-            val responseBody = response.body?.string()
-                ?: throw IOException("Empty response body")
+            val responseBody = response.body.string()
             return json.readValue(responseBody)
         }
     }

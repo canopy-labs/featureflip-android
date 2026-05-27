@@ -149,7 +149,7 @@ internal class StreamingDataSource(
                 retryCount = 0
             }
 
-            val reader = response.body?.source()?.inputStream()?.bufferedReader() ?: return
+            val reader = response.body.source().inputStream().bufferedReader()
             readSseStream(reader)
         }
     }

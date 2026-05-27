@@ -89,13 +89,36 @@ class HttpClientTest {
 
         val client = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
         val events = listOf(
-            SdkEvent(type = "Custom", flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
         )
         client.postEvents(events)
 
         val request = server.takeRequest()
         assertThat(request.requestLine).contains("/v1/sdk/events")
         assertThat(request.headers["Authorization"]).isEqualTo("test-key")
+    }
+
+    @Test
+    fun `postEvents omits null optional fields and serializes type as PascalCase`() {
+        server.enqueue(MockResponse.Builder().code(200).build())
+
+        val client = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
+        val events = listOf(
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", timestamp = "2025-01-01T00:00:00Z"),
+        )
+        client.postEvents(events)
+
+        val request = server.takeRequest()
+        val rawBody = request.body!!.utf8()
+
+        // PascalCase enum on the wire (matches server JsonStringEnumConverter)
+        assertThat(rawBody).contains("\"type\":\"Custom\"")
+        assertThat(rawBody).contains("\"flagKey\":\"test-event\"")
+
+        // Null optional fields must be omitted from the wire payload
+        assertThat(rawBody).doesNotContain("\"userId\"")
+        assertThat(rawBody).doesNotContain("\"variation\"")
+        assertThat(rawBody).doesNotContain("\"metadata\"")
     }
 
     @Test

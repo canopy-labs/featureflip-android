@@ -35,10 +35,10 @@ class EventProcessorTest {
         val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
 
         processor.enqueue(
-            SdkEvent(type = "Custom", flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
         )
         processor.enqueue(
-            SdkEvent(type = "Custom", flagKey = "test-event", userId = "user-2", timestamp = "2025-01-01T00:00:01Z"),
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-2", timestamp = "2025-01-01T00:00:01Z"),
         )
         processor.flush()
 
@@ -70,7 +70,7 @@ class EventProcessorTest {
         val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
 
         processor.enqueue(
-            SdkEvent(type = "Custom", flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
         )
         processor.flush() // Fails with 500
         processor.flush() // Retries with 200
@@ -96,10 +96,10 @@ class EventProcessorTest {
         val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 2, scope = testScope)
 
         processor.enqueue(
-            SdkEvent(type = "Custom", flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
         )
         processor.enqueue(
-            SdkEvent(type = "Custom", flagKey = "test-event", userId = "user-2", timestamp = "2025-01-01T00:00:01Z"),
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-2", timestamp = "2025-01-01T00:00:01Z"),
         )
 
         // Events should be back in buffer — flush again
@@ -117,7 +117,7 @@ class EventProcessorTest {
         processor.start()
 
         processor.enqueue(
-            SdkEvent(type = "Custom", flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
+            SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
         )
         processor.stop()
 

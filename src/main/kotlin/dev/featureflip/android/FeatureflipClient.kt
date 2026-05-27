@@ -76,6 +76,15 @@ class FeatureflipClient private constructor(
 
     fun flush() = core.flush()
 
+    /**
+     * Returns the cached [FlagValue] (or `null` if the SDK has no entry for
+     * [key]). Exposes the full server response — value, variation, reason,
+     * and `prerequisiteKey` — rather than just the unwrapped value returned
+     * by [boolVariation] / [stringVariation] / etc. Mirrors the `flagDetail`
+     * accessor on the browser and Swift SDKs.
+     */
+    fun flagDetail(key: String): FlagValue? = core.allFlags()[key]
+
     // -- Internal test helpers (package-private access via Kotlin internal) --
 
     internal fun allFlags(): Map<String, FlagValue> = core.allFlags()

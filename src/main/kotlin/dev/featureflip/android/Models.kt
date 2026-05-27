@@ -1,6 +1,7 @@
 package dev.featureflip.android
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
 
 /**
@@ -8,9 +9,12 @@ import com.fasterxml.jackson.annotation.JsonProperty
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class FlagValue(
-    @JsonProperty("value") val value: Any?,
-    @JsonProperty("variation") val variation: String,
-    @JsonProperty("reason") val reason: String,
+    @param:JsonProperty("value") val value: Any?,
+    @param:JsonProperty("variation") val variation: String,
+    @param:JsonProperty("reason") val reason: String,
+    @param:JsonProperty("prerequisiteKey")
+    @param:JsonInclude(JsonInclude.Include.NON_NULL)
+    val prerequisiteKey: String? = null,
 )
 
 /**
@@ -18,18 +22,19 @@ data class FlagValue(
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 internal data class EvaluateResponse(
-    @JsonProperty("flags") val flags: Map<String, FlagValue>,
+    @param:JsonProperty("flags") val flags: Map<String, FlagValue>,
 )
 
 /**
  * An analytics event sent to /v1/sdk/events.
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 internal data class SdkEvent(
-    val type: String,
-    val flagKey: String? = null,
+    val type: SdkEventType,
+    val flagKey: String,
+    val timestamp: String,
     val userId: String? = null,
     val variation: String? = null,
-    val timestamp: String,
     val metadata: Map<String, Any?>? = null,
 )
 
