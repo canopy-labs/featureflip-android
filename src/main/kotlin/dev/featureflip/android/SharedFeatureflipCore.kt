@@ -36,12 +36,16 @@ internal class SharedFeatureflipCore private constructor(
     private val cache: FlagCache,
     private val isTestClient: Boolean,
     initialFlags: Map<String, FlagValue>,
+    private val anonymousKeyStore: AnonymousKeyStore,
 ) {
     private val snapshotLock = ReentrantReadWriteLock()
     private var flagSnapshot: MutableMap<String, FlagValue> = initialFlags.toMutableMap()
 
     private val lock = ReentrantReadWriteLock()
-    private var currentContext: Map<String, String> = config.context
+    // For real clients, resolve a persisted anonymous user_id into the working
+    // context up front so evaluate, SSE, polling, and track() all carry it.
+    private var currentContext: Map<String, String> =
+        if (isTestClient) config.context else resolveAnonymousContext(config.context, anonymousKeyStore)
     private var _initialized = false
     private var streamingDataSource: StreamingDataSource? = null
     private var pollingDataSource: PollingDataSource? = null
@@ -143,9 +147,11 @@ internal class SharedFeatureflipCore private constructor(
                 updateSnapshot(cached)
             }
 
-            // Fetch initial flags
+            // Fetch initial flags. Use currentContext (not config.context) so the
+            // persisted anonymous user_id resolved at construction is sent.
             try {
-                val response = httpClient.evaluate(config.context, config.initTimeoutMs)
+                val initialContext = lock.read { currentContext }
+                val response = httpClient.evaluate(initialContext, config.initTimeoutMs)
                 cache.setAll(response.flags)
                 updateSnapshot(response.flags)
             } catch (_: Exception) {
@@ -237,17 +243,18 @@ internal class SharedFeatureflipCore private constructor(
             lock.write { currentContext = context }
             return
         }
+        val resolved = resolveAnonymousContext(context, anonymousKeyStore)
         val connectionId = lock.read { streamingDataSource }?.connectionId
-        val response = httpClient.identify(context, connectionId)
+        val response = httpClient.identify(resolved, connectionId)
         cache.setAll(response.flags)
         updateSnapshot(response.flags)
 
         val (stream, poller) = lock.write {
-            currentContext = context
+            currentContext = resolved
             streamingDataSource to pollingDataSource
         }
-        stream?.updateContext(context)
-        poller?.updateContext(context)
+        stream?.updateContext(resolved)
+        poller?.updateContext(resolved)
     }
 
     fun track(eventName: String, metadata: Map<String, Any?>?) {
@@ -354,19 +361,27 @@ internal class SharedFeatureflipCore private constructor(
 
     companion object {
         /** Real constructor used by the factory. */
-        internal fun create(config: FeatureflipConfig, callFactory: Call.Factory? = null): SharedFeatureflipCore {
+        internal fun create(
+            config: FeatureflipConfig,
+            callFactory: Call.Factory? = null,
+            anonymousKeyStore: AnonymousKeyStore? = null,
+        ): SharedFeatureflipCore {
             val httpClient = if (callFactory != null) {
                 HttpClient(config.baseUrl, config.clientKey, callFactory)
             } else {
                 HttpClient(config.baseUrl, config.clientKey)
             }
             val cache = FlagCache(config.clientKey)
+            val store = anonymousKeyStore
+                ?: config.applicationContext?.let { SharedPreferencesAnonymousKeyStore.fromContext(it) }
+                ?: InMemoryAnonymousKeyStore()
             return SharedFeatureflipCore(
                 config = config,
                 httpClient = httpClient,
                 cache = cache,
                 isTestClient = false,
                 initialFlags = emptyMap(),
+                anonymousKeyStore = store,
             )
         }
 
@@ -389,6 +404,7 @@ internal class SharedFeatureflipCore private constructor(
                 cache = cache,
                 isTestClient = true,
                 initialFlags = flags,
+                anonymousKeyStore = InMemoryAnonymousKeyStore(),
             ).also {
                 it.snapshotLock.write { it.flagSnapshot = flags.toMutableMap() }
                 it.lock.write { it._initialized = true }
