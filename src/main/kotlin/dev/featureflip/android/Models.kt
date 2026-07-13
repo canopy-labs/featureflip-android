@@ -23,6 +23,9 @@ data class FlagValue(
 @JsonIgnoreProperties(ignoreUnknown = true)
 internal data class EvaluateResponse(
     @param:JsonProperty("flags") val flags: Map<String, FlagValue>,
+    // The client SSE connect-time snapshot carries `full: true` (#1873); deltas omit it.
+    // Absent on /v1/client/evaluate + polling responses (they are always full replaces).
+    @param:JsonProperty("full") val full: Boolean = false,
 )
 
 /**

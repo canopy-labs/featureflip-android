@@ -1,8 +1,10 @@
 package dev.featureflip.android
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -331,6 +333,51 @@ class FeatureflipClientTest {
         val body = request!!.body!!.utf8()
         assertThat(body).contains("user-b")
         assertThat(body.contains("user-a")).isFalse()
+
+        client.close()
+    }
+
+    // -- Streaming -> polling fallback tears down the dormant stream --
+
+    @Test
+    fun `streaming fallback stops and nulls the stream before starting the poller`() {
+        val evaluateBody = makeEvaluateResponseBody(mapOf("feature" to flagValue(true)))
+
+        // Route by path: keep the SSE connect idle-open (headers sent, body delayed)
+        // so the streaming source stays established; evaluate/poll always returns flags.
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return if (request.target.contains("/v1/client/stream")) {
+                    MockResponse.Builder().code(200).bodyDelay(30, TimeUnit.SECONDS).body("").build()
+                } else {
+                    MockResponse.Builder().body(evaluateBody).build()
+                }
+            }
+        }
+
+        val config = FeatureflipConfig(
+            clientKey = "test-key",
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            streaming = true,
+            pollIntervalMs = 60_000,
+        )
+        val client = FeatureflipClient.get(config)
+        client.initialize()
+
+        // streaming = true starts a live SSE source during initialize.
+        assertThat(client.hasStreamingSource()).isTrue()
+
+        // Simulate the stream exhausting its retries (the onMaxRetriesReached callback).
+        client.handleStreamingFallback()
+
+        // The dormant stream must be torn down so a later foreground/identify cannot
+        // resurrect it alongside the poller (both live -> stale-overwrite flicker).
+        assertThat(client.hasStreamingSource())
+            .`as`("streaming source should be stopped and nulled on fallback")
+            .isFalse()
+        assertThat(client.hasPollingSource())
+            .`as`("polling should take over after fallback")
+            .isTrue()
 
         client.close()
     }

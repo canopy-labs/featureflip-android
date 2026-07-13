@@ -96,6 +96,12 @@ class FeatureflipClient private constructor(
 
     internal fun startPolling() = core.startPolling()
 
+    internal fun handleStreamingFallback() = core.handleStreamingFallback()
+
+    internal fun hasStreamingSource(): Boolean = core.hasStreamingSource()
+
+    internal fun hasPollingSource(): Boolean = core.hasPollingSource()
+
     /** Exposed for tests that simulate lifecycle transitions. */
     internal val lifecycleObserver: LifecycleObserver?
         get() = core.lifecycleObserver

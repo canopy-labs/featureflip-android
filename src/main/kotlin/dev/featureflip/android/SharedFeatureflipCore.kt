@@ -279,6 +279,10 @@ internal class SharedFeatureflipCore private constructor(
 
     internal fun allFlags(): Map<String, FlagValue> = snapshotLock.read { flagSnapshot.toMap() }
 
+    internal fun hasStreamingSource(): Boolean = lock.read { streamingDataSource != null }
+
+    internal fun hasPollingSource(): Boolean = lock.read { pollingDataSource != null }
+
     // -- Private --
 
     private fun isoFormat(): SimpleDateFormat {
@@ -301,6 +305,10 @@ internal class SharedFeatureflipCore private constructor(
                 clientKey = config.clientKey,
                 context = ctx,
                 onChange = { flags -> handleStreamingUpdate(flags) },
+                // First flags-updated after (re)connect is the full snapshot -> REPLACE.
+                onSnapshot = { flags -> handleFullUpdate(flags) },
+                // Stream exhausted its retries -> fall back to polling (retries forever).
+                onMaxRetriesReached = { handleStreamingFallback() },
             )
             source.start()
             lock.write { streamingDataSource = source }
@@ -310,15 +318,37 @@ internal class SharedFeatureflipCore private constructor(
     }
 
     internal fun startPolling() {
+        // Idempotent: a stream->polling fallback must start at most one poller.
+        if (lock.read { pollingDataSource } != null) return
         val ctx = lock.read { currentContext }
         val source = PollingDataSource(
             httpClient = httpClient,
             context = ctx,
             intervalMs = config.pollIntervalMs,
-            onChange = { flags -> handlePollingUpdate(flags) },
+            onChange = { flags -> handleFullUpdate(flags) },
         )
         source.start()
         lock.write { pollingDataSource = source }
+    }
+
+    /**
+     * Streaming exhausted its retries: tear down the dormant streaming source
+     * before falling back to polling (which retries forever). Stopping and
+     * nulling the stream is what keeps a later [handleForeground]/[identify]
+     * from resurrecting it alongside the poller — two live sources racing
+     * stale deltas over fresh poll snapshots. Mirrors Flutter's
+     * `_handleStreamingFallback`. Called from the [StreamingDataSource]
+     * `onMaxRetriesReached` callback (safe to call from within it: `stop()`
+     * only cancels the coroutine, it does not join).
+     */
+    internal fun handleStreamingFallback() {
+        val stream = lock.write {
+            val s = streamingDataSource
+            streamingDataSource = null
+            s
+        }
+        stream?.stop()
+        startPolling()
     }
 
     private fun handleStreamingUpdate(delta: Map<String, FlagValue>) {
@@ -326,7 +356,7 @@ internal class SharedFeatureflipCore private constructor(
         cache.setAll(merged)
     }
 
-    private fun handlePollingUpdate(flags: Map<String, FlagValue>) {
+    private fun handleFullUpdate(flags: Map<String, FlagValue>) {
         updateSnapshot(flags)
         cache.setAll(flags)
     }

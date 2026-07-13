@@ -22,7 +22,14 @@ internal class StreamingDataSource(
     private val clientKey: String,
     context: Map<String, String>,
     private val onChange: (Map<String, FlagValue>) -> Unit,
+    // Full snapshot the server sends first on every (re)connect -> apply as a REPLACE.
+    // Defaults to onChange so older call sites keep the pre-fix (merge-only) behavior.
+    private val onSnapshot: (Map<String, FlagValue>) -> Unit = onChange,
+    // Invoked when the stream has failed MAX_RETRIES times so the core can fall back
+    // to polling (which retries forever). Never a terminal give-up.
+    private val onMaxRetriesReached: (() -> Unit)? = null,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    private val initialBackoffMs: Long = INITIAL_BACKOFF_MS,
 ) {
     internal data class SSEEvent(val eventType: String, val data: String)
 
@@ -67,7 +74,7 @@ internal class StreamingDataSource(
     private var context: Map<String, String> = context
     private var job: Job? = null
     private var activeCall: Call? = null
-    private var backoffMs = INITIAL_BACKOFF_MS
+    private var backoffMs = initialBackoffMs
     private var retryCount = 0
 
     @Volatile
@@ -86,7 +93,7 @@ internal class StreamingDataSource(
         job?.cancel()
         lock.withLock {
             retryCount = 0
-            backoffMs = INITIAL_BACKOFF_MS
+            backoffMs = initialBackoffMs
             sseClient?.dispatcher?.executorService?.shutdown()
             sseClient?.connectionPool?.evictAll()
             sseClient = createClient()
@@ -114,7 +121,11 @@ internal class StreamingDataSource(
     private suspend fun connectLoop() {
         while (currentCoroutineContext().isActive) {
             val (currentRetryCount, currentBackoff) = lock.withLock { retryCount to backoffMs }
-            if (currentRetryCount >= MAX_RETRIES) return
+            if (currentRetryCount >= MAX_RETRIES) {
+                // Not terminal: hand off to the polling fallback (retries forever).
+                onMaxRetriesReached?.invoke()
+                return
+            }
 
             try {
                 connect()
@@ -143,9 +154,9 @@ internal class StreamingDataSource(
         call.execute().use { response ->
             if (response.code != 200) return
 
-            // Reset backoff on successful connection
+            // Reset backoff on successful connection.
             lock.withLock {
-                backoffMs = INITIAL_BACKOFF_MS
+                backoffMs = initialBackoffMs
                 retryCount = 0
             }
 
@@ -167,7 +178,7 @@ internal class StreamingDataSource(
         }
     }
 
-    private fun handleEvent(event: SSEEvent) {
+    internal fun handleEvent(event: SSEEvent) {
         if (event.eventType == "connection-ready") {
             try {
                 val data: Map<String, String> = json.readValue(event.data)
@@ -178,7 +189,11 @@ internal class StreamingDataSource(
         if (event.eventType != "flags-updated") return
         try {
             val response: EvaluateResponse = json.readValue(event.data)
-            onChange(response.flags)
+            // The connect-time snapshot is marked `full: true` (#1873) -> REPLACE the
+            // store (drops flags deleted during the outage). Deltas omit it -> MERGE.
+            // Keyed off the explicit marker, not event order, so a delta racing ahead
+            // of the snapshot can't be mistaken for a full replace.
+            if (response.full) onSnapshot(response.flags) else onChange(response.flags)
         } catch (_: Exception) {
             // Ignore parse errors
         }
