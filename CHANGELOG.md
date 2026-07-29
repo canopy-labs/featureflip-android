@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.4.0 — 2026-07-29
+
+### Added
+
+- **`onEvaluation` inspector callback.** `inspectors` config option registering in-process observers fired on every evaluation. Notified from the four variation accessors after type coercion — `flagDetail()` and all-flags accessors stay silent so one decision is never double-counted. `reason` is the engine's kebab-case string forwarded verbatim; a flag absent from the snapshot synthesizes `flag-not-found` (#1914).
+
+## 2.3.0 — 2026-07-13
+
+### Fixed
+
+- Outage-recovery hardening: reconnect-forever fallback and replace-on-reconnect (#1882).
+- The connect-snapshot store replacement is keyed off the explicit `full: true` marker rather than event order, which was ambiguous when a delta arrived first (#1886).
+- The SSE stream is stopped when falling back to polling, instead of being left open alongside it (#1902).
+
+## 2.2.0 — 2026-06-19
+
+### Added
+
+- A generated anonymous `user_id` is persisted in `SharedPreferences` (via an optional `applicationContext` on config, with an in-memory fallback when absent) and injected at every evaluate/identify/SSE call, so anonymous users bucket consistently (#1467).
+
 ## 2.1.1 — 2026-06-03
 
 ### Changed

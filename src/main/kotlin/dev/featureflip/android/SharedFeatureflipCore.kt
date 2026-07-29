@@ -17,6 +17,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
 
+/** The engine embeds the matched rule id in the reason as `rule-match:{id}`. */
+private const val RULE_MATCH_PREFIX = "rule-match:"
+
 /**
  * Internal shared core owning all expensive resources of a FeatureflipClient:
  * the HTTP client, disk cache, streaming/polling data sources, event processor,
@@ -216,26 +219,72 @@ internal class SharedFeatureflipCore private constructor(
     // -- Variation methods --
 
     fun boolVariation(key: String, defaultValue: Boolean): Boolean {
-        val flag = getFlag(key) ?: return defaultValue
-        return flag.value as? Boolean ?: defaultValue
+        val flag = getFlag(key)
+        val value = flag?.value as? Boolean ?: defaultValue
+        notifyInspectors(key, flag, value)
+        return value
     }
 
     fun stringVariation(key: String, defaultValue: String): String {
-        val flag = getFlag(key) ?: return defaultValue
-        return flag.value as? String ?: defaultValue
+        val flag = getFlag(key)
+        val value = flag?.value as? String ?: defaultValue
+        notifyInspectors(key, flag, value)
+        return value
     }
 
     fun numberVariation(key: String, defaultValue: Double): Double {
-        val flag = getFlag(key) ?: return defaultValue
-        return when (val v = flag.value) {
-            is Number -> v.toDouble()
-            else -> defaultValue
-        }
+        val flag = getFlag(key)
+        val value = (flag?.value as? Number)?.toDouble() ?: defaultValue
+        notifyInspectors(key, flag, value)
+        return value
     }
 
     fun jsonVariation(key: String, defaultValue: Any?): Any? {
-        val flag = getFlag(key) ?: return defaultValue
-        return flag.value
+        val flag = getFlag(key)
+        val value = if (flag == null) defaultValue else flag.value
+        notifyInspectors(key, flag, value)
+        return value
+    }
+
+    /**
+     * Fire the registered inspectors. Called once per variation call, after type
+     * coercion, so [value] is exactly what the accessor returns. A throwing
+     * inspector is isolated: it neither breaks the returned value nor stops the
+     * remaining inspectors.
+     */
+    private fun notifyInspectors(key: String, flag: FlagValue?, value: Any?) {
+        val inspectors = config.inspectors
+        if (inspectors.isEmpty() || isShutDown.get()) return
+
+        // The flag is absent from the snapshot (unknown key, not yet
+        // initialized, or not clientSideVisible). The server never sent a reason
+        // for it, so synthesize one in the same kebab-case as the rest.
+        val reason = flag?.reason ?: "flag-not-found"
+        val ruleId = if (reason.startsWith(RULE_MATCH_PREFIX)) {
+            reason.removePrefix(RULE_MATCH_PREFIX).ifEmpty { null }
+        } else {
+            null
+        }
+
+        val event = EvaluationEvent(
+            flagKey = key,
+            // Copy, so a buggy inspector cannot mutate core state.
+            context = lock.read { currentContext.toMap() },
+            value = value,
+            variationKey = flag?.variation,
+            reason = reason,
+            ruleId = ruleId,
+            prerequisiteKey = flag?.prerequisiteKey,
+            timestamp = isoFormat().format(Date()),
+        )
+
+        for (inspector in inspectors) {
+            try {
+                inspector(event)
+            } catch (e: Exception) {
+                System.err.println("[featureflip] evaluation inspector threw: $e")
+            }
+        }
     }
 
     fun identify(context: Map<String, String>) {
@@ -282,6 +331,11 @@ internal class SharedFeatureflipCore private constructor(
     internal fun hasStreamingSource(): Boolean = lock.read { streamingDataSource != null }
 
     internal fun hasPollingSource(): Boolean = lock.read { pollingDataSource != null }
+
+    /** Test-only: replace the snapshot with hand-built [FlagValue]s. */
+    internal fun applyFlagUpdateForTest(flags: Map<String, FlagValue>) {
+        updateSnapshot(flags)
+    }
 
     // -- Private --
 
@@ -419,8 +473,15 @@ internal class SharedFeatureflipCore private constructor(
          * Test-only core: no network calls, snapshot pre-populated, marked
          * initialized immediately.
          */
-        internal fun createForTesting(overrides: Map<String, Any?>): SharedFeatureflipCore {
-            val dummyConfig = FeatureflipConfig(clientKey = "test-key", baseUrl = "https://localhost")
+        internal fun createForTesting(
+            overrides: Map<String, Any?>,
+            inspectors: List<EvaluationInspector> = emptyList(),
+        ): SharedFeatureflipCore {
+            val dummyConfig = FeatureflipConfig(
+                clientKey = "test-key",
+                baseUrl = "https://localhost",
+                inspectors = inspectors,
+            )
             val httpClient = HttpClient(dummyConfig.baseUrl, dummyConfig.clientKey)
             val cache = FlagCache(dummyConfig.clientKey)
 

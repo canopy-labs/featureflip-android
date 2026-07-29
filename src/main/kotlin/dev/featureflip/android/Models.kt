@@ -47,3 +47,27 @@ internal data class SdkEvent(
 internal data class RecordEventsRequest(
     val events: List<SdkEvent>,
 )
+
+/**
+ * Emitted once per variation call. [reason] is the server's kebab-case string
+ * forwarded verbatim — client SDKs have no local evaluator, so the engine is
+ * their evaluator. The one synthesized value is `flag-not-found`, used when the
+ * flag is absent from the snapshot.
+ */
+data class EvaluationEvent(
+    val flagKey: String,
+    val context: Map<String, String>,
+    val value: Any?,
+    /** The served arm. Null when the flag is absent from the snapshot. */
+    val variationKey: String?,
+    val reason: String,
+    /** Parsed from a `rule-match:{id}` reason; null for every other reason. */
+    val ruleId: String?,
+    /** Set by the server only when `reason == "prerequisite-failed"`. */
+    val prerequisiteKey: String?,
+    /** ISO-8601. */
+    val timestamp: String,
+)
+
+/** An in-process observer invoked on every variation call. Return value ignored. */
+typealias EvaluationInspector = (EvaluationEvent) -> Unit

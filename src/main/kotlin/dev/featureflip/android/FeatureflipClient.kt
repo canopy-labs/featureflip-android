@@ -176,8 +176,12 @@ class FeatureflipClient private constructor(
          * instance with its own snapshot and no background workers.
          */
         @JvmStatic
-        fun forTesting(overrides: Map<String, Any?>): FeatureflipClient {
-            return FeatureflipClient(SharedFeatureflipCore.createForTesting(overrides))
+        @JvmOverloads
+        fun forTesting(
+            overrides: Map<String, Any?>,
+            inspectors: List<EvaluationInspector> = emptyList(),
+        ): FeatureflipClient {
+            return FeatureflipClient(SharedFeatureflipCore.createForTesting(overrides, inspectors))
         }
 
         /**

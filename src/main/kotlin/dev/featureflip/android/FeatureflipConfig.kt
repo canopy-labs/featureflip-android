@@ -20,4 +20,10 @@ data class FeatureflipConfig(
     val flushBatchSize: Int = 100,
     val initTimeoutMs: Long = 10_000,
     val applicationContext: Any? = null,
+    /**
+     * In-process observers fired on every variation call. Honored on the first
+     * `get()` per client key, like every other option. Deliberately excluded
+     * from `configsEqual` — functions are not structurally comparable.
+     */
+    val inspectors: List<EvaluationInspector> = emptyList(),
 )
