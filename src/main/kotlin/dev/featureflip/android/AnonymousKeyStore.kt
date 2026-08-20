@@ -103,6 +103,13 @@ class SharedPreferencesAnonymousKeyStore private constructor(
 }
 
 /**
+ * True when a context value is a usable caller id. Values are `Any?` since #2293,
+ * so a numeric `user_id` is a real id too — stringify before testing blankness
+ * rather than demanding a String and silently treating `user_id = 42` as absent.
+ */
+private fun Any?.isPresentId(): Boolean = this != null && this.toString().isNotBlank()
+
+/**
  * Returns a context guaranteed to carry a non-blank `user_id`. A real caller id
  * (either the canonical `user_id` or its accepted `userId` alias, mirroring the
  * engine's ClientContextMapper) is returned unchanged so a real user always
@@ -110,8 +117,8 @@ class SharedPreferencesAnonymousKeyStore private constructor(
  * once — and injected under `user_id`, giving anonymous users sticky
  * percentage-rollout bucketing.
  */
-fun resolveAnonymousContext(context: Map<String, String>, store: AnonymousKeyStore): Map<String, String> {
-    if (!context["user_id"].isNullOrBlank() || !context["userId"].isNullOrBlank()) {
+fun resolveAnonymousContext(context: Map<String, Any?>, store: AnonymousKeyStore): Map<String, Any?> {
+    if (context["user_id"].isPresentId() || context["userId"].isPresentId()) {
         return context
     }
     val key = store.read()?.takeIf { it.isNotBlank() }

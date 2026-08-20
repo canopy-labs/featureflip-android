@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.0 — 2026-08-20
+
+### Fixed
+
+- A closed handle serves the caller's default from every accessor and reports not-initialized. `close()` releases the shared core — stopping streaming and polling, shutting down the event processor — but the in-memory cache stayed readable, so a closed client kept evaluating against a frozen snapshot that could never update again while still reporting itself initialized. ([#2295](https://github.com/canopy-labs/featureflip/issues/2295))
+
+- A failed initial flag fetch is now diagnosable rather than swallowed by a bare `catch (_: Exception)`. ([#2294](https://github.com/canopy-labs/featureflip/issues/2294))
+### Changed
+
+- **BREAKING:** the evaluation context now accepts any JSON value, not just strings. It was typed `Map<String, String>`, so this SDK could not send a JSON number — and the engine's equality coercion only engages for numbers, so a rule like `age Equals ["25.0"]` matched on web and Flutter and silently no-opped here ([#2293](https://github.com/canopy-labs/featureflip/issues/2293)).
+
+  `FeatureflipConfig.context` and `identify()` now take `Map<String, Any?>`, as do `EvaluationEvent.context` and the data sources. Source-compatible for callers passing a string map; breaking for code **reading** `event.context[k]` as a `String`.
+
 ## 2.4.1 — 2026-08-05
 
 ### Fixed

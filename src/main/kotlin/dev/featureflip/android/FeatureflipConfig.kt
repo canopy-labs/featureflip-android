@@ -13,7 +13,7 @@ package dev.featureflip.android
 data class FeatureflipConfig(
     val clientKey: String,
     val baseUrl: String = "https://eval.featureflip.io",
-    val context: Map<String, String> = emptyMap(),
+    val context: Map<String, Any?> = emptyMap(),
     val streaming: Boolean = true,
     val pollIntervalMs: Long = 30_000,
     val flushIntervalMs: Long = 30_000,

@@ -29,11 +29,11 @@ internal class HttpClient(
 
     private val callFactory: Call.Factory = callFactory ?: defaultClient
 
-    fun evaluate(context: Map<String, String>, timeoutMs: Long? = null): EvaluateResponse {
+    fun evaluate(context: Map<String, Any?>, timeoutMs: Long? = null): EvaluateResponse {
         return post("/v1/client/evaluate", mapOf("context" to context), timeoutMs)
     }
 
-    fun identify(context: Map<String, String>, connectionId: String? = null): EvaluateResponse {
+    fun identify(context: Map<String, Any?>, connectionId: String? = null): EvaluateResponse {
         return post("/v1/client/identify", mapOf("context" to context), extraHeaders = connectionId?.let { mapOf("X-Connection-Id" to it) })
     }
 

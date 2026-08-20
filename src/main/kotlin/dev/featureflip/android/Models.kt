@@ -56,7 +56,7 @@ internal data class RecordEventsRequest(
  */
 data class EvaluationEvent(
     val flagKey: String,
-    val context: Map<String, String>,
+    val context: Map<String, Any?>,
     val value: Any?,
     /** The served arm. Null when the flag is absent from the snapshot. */
     val variationKey: String?,

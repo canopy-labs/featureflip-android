@@ -9,13 +9,13 @@ import kotlin.concurrent.withLock
  */
 internal class PollingDataSource(
     private val httpClient: HttpClient,
-    context: Map<String, String>,
+    context: Map<String, Any?>,
     private val intervalMs: Long,
     private val onChange: (Map<String, FlagValue>) -> Unit,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
 ) {
     private val lock = ReentrantLock()
-    private var context: Map<String, String> = context
+    private var context: Map<String, Any?> = context
     private var job: Job? = null
 
     fun start() {
@@ -34,7 +34,7 @@ internal class PollingDataSource(
         job = null
     }
 
-    fun updateContext(newContext: Map<String, String>) {
+    fun updateContext(newContext: Map<String, Any?>) {
         lock.withLock { context = newContext }
     }
 

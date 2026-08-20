@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "io.featureflip"
-version = "2.4.1"
+version = "3.0.0"
 
 java {
     toolchain {
@@ -31,7 +31,7 @@ dependencies {
     // Note: androidx.lifecycle is accessed via reflection at runtime when available.
     // No compile-time dependency needed — the SDK works on both Android and pure JVM.
 
-    testImplementation("org.junit.jupiter:junit-jupiter:6.1.2")
+    testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("com.squareup.okhttp3:mockwebserver3-junit5:5.4.0")
     testImplementation("org.assertj:assertj-core:3.27.7")

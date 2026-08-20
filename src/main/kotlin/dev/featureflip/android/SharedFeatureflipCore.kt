@@ -47,7 +47,7 @@ internal class SharedFeatureflipCore private constructor(
     private val lock = ReentrantReadWriteLock()
     // For real clients, resolve a persisted anonymous user_id into the working
     // context up front so evaluate, SSE, polling, and track() all carry it.
-    private var currentContext: Map<String, String> =
+    private var currentContext: Map<String, Any?> =
         if (isTestClient) config.context else resolveAnonymousContext(config.context, anonymousKeyStore)
     private var _initialized = false
     private var streamingDataSource: StreamingDataSource? = null
@@ -157,8 +157,23 @@ internal class SharedFeatureflipCore private constructor(
                 val response = httpClient.evaluate(initialContext, config.initTimeoutMs)
                 cache.setAll(response.flags)
                 updateSnapshot(response.flags)
-            } catch (_: Exception) {
-                // Use cached flags if available
+            } catch (e: Exception) {
+                // NON-TERMINAL BY DESIGN — do not rethrow, and do not leave
+                // _initialized false. Any flags already loaded from disk above keep
+                // serving, the data source started below retries forever and
+                // re-snapshots on connect, and anything still unknown falls back to
+                // the caller's default. This matches the browser and flutter SDKs;
+                // throwing here would take an app down at startup over a transient
+                // blip.
+                //
+                // But it must not be SILENT. A revoked key, a 4xx/5xx, a timeout and
+                // a JSON parse failure otherwise all present exactly like a healthy
+                // start, and the caller cannot tell a working client from a
+                // completely misconfigured one (#2294).
+                System.err.println(
+                    "[featureflip] initial flag fetch failed, serving cached or default " +
+                        "values until the data source recovers: $e",
+                )
             }
 
             // Start data source
@@ -287,7 +302,7 @@ internal class SharedFeatureflipCore private constructor(
         }
     }
 
-    fun identify(context: Map<String, String>) {
+    fun identify(context: Map<String, Any?>) {
         if (isTestClient) {
             lock.write { currentContext = context }
             return
@@ -308,7 +323,10 @@ internal class SharedFeatureflipCore private constructor(
 
     fun track(eventName: String, metadata: Map<String, Any?>?) {
         if (isTestClient) return
-        val userId = lock.read { currentContext["user_id"] }
+        // Context values are Any? since #2293; SdkEvent.userId is String?. `?.toString()`
+        // keeps an absent id null rather than the literal "null", and carries a numeric
+        // id through as its decimal form.
+        val userId = lock.read { currentContext["user_id"]?.toString() }
         val event = SdkEvent(
             type = SdkEventType.Custom,
             flagKey = eventName,

@@ -8,7 +8,7 @@ Android/Kotlin SDK for [Featureflip](https://featureflip.io) — evaluate featur
 
 ```kotlin
 dependencies {
-    implementation("io.featureflip:featureflip-android:2.4.1")
+    implementation("io.featureflip:featureflip-android:3.0.0")
 }
 ```
 
@@ -16,7 +16,7 @@ dependencies {
 
 ```groovy
 dependencies {
-    implementation 'io.featureflip:featureflip-android:2.4.1'
+    implementation 'io.featureflip:featureflip-android:3.0.0'
 }
 ```
 

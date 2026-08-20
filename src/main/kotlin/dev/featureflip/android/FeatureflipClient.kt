@@ -26,9 +26,14 @@ class FeatureflipClient private constructor(
 ) {
     private val disposed = AtomicBoolean(false)
 
-    /** Whether the underlying shared core has been initialized. */
+    /**
+     * Whether the underlying shared core has been initialized.
+     *
+     * False once this handle is closed: [close] releases the core, so the handle can
+     * no longer evaluate anything (#2295).
+     */
     val isInitialized: Boolean
-        get() = core.isInitialized
+        get() = !disposed.get() && core.isInitialized
 
     /**
      * Initializes the underlying shared core: loads disk cache, fetches flags,
@@ -54,22 +59,28 @@ class FeatureflipClient private constructor(
     }
 
     // -- Variation methods --
+    //
+    // A closed handle serves the caller's default (#2295, contract from #2313).
+    // close() releases the core — stopping streaming/polling, removing the lifecycle
+    // observer, flushing events — but the in-memory cache stays readable, so without
+    // these guards the handle would keep serving a frozen snapshot that can never
+    // update again.
 
     fun boolVariation(key: String, defaultValue: Boolean): Boolean =
-        core.boolVariation(key, defaultValue)
+        if (disposed.get()) defaultValue else core.boolVariation(key, defaultValue)
 
     fun stringVariation(key: String, defaultValue: String): String =
-        core.stringVariation(key, defaultValue)
+        if (disposed.get()) defaultValue else core.stringVariation(key, defaultValue)
 
     fun numberVariation(key: String, defaultValue: Double): Double =
-        core.numberVariation(key, defaultValue)
+        if (disposed.get()) defaultValue else core.numberVariation(key, defaultValue)
 
     fun jsonVariation(key: String, defaultValue: Any?): Any? =
-        core.jsonVariation(key, defaultValue)
+        if (disposed.get()) defaultValue else core.jsonVariation(key, defaultValue)
 
     // -- Identify / track / flush --
 
-    fun identify(context: Map<String, String>) = core.identify(context)
+    fun identify(context: Map<String, Any?>) = core.identify(context)
 
     fun track(eventName: String, metadata: Map<String, Any?>? = null) =
         core.track(eventName, metadata)
@@ -83,11 +94,13 @@ class FeatureflipClient private constructor(
      * by [boolVariation] / [stringVariation] / etc. Mirrors the `flagDetail`
      * accessor on the browser and Swift SDKs.
      */
-    fun flagDetail(key: String): FlagValue? = core.allFlags()[key]
+    fun flagDetail(key: String): FlagValue? =
+        if (disposed.get()) null else core.allFlags()[key]
 
     // -- Internal test helpers (package-private access via Kotlin internal) --
 
-    internal fun allFlags(): Map<String, FlagValue> = core.allFlags()
+    internal fun allFlags(): Map<String, FlagValue> =
+        if (disposed.get()) emptyMap() else core.allFlags()
 
     internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> =
         core.mergeSnapshot(delta)

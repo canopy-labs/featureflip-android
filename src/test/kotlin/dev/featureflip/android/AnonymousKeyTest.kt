@@ -18,7 +18,7 @@ class AnonymousKeyTest {
         val store = InMemoryAnonymousKeyStore()
         val first = resolveAnonymousContext(mapOf("plan" to "pro"), store)
         assertThat(first["user_id"]).isNotNull()
-        assertThat(first["user_id"]).isNotBlank()
+        assertThat(first["user_id"].toString()).isNotBlank()
         assertThat(first["plan"]).isEqualTo("pro")
 
         // Second call reads the SAME persisted key.
@@ -46,7 +46,7 @@ class AnonymousKeyTest {
     fun `blank user_id treated as anonymous`() {
         val store = InMemoryAnonymousKeyStore()
         val out = resolveAnonymousContext(mapOf("user_id" to "   "), store)
-        assertThat(out["user_id"]?.isNotBlank()).isTrue()
+        assertThat(out["user_id"].toString().isNotBlank()).isTrue()
         assertThat(out["user_id"]).isNotEqualTo("   ")
     }
 

@@ -20,7 +20,7 @@ import kotlin.math.min
 internal class StreamingDataSource(
     private val baseUrl: String,
     private val clientKey: String,
-    context: Map<String, String>,
+    context: Map<String, Any?>,
     private val onChange: (Map<String, FlagValue>) -> Unit,
     // Full snapshot the server sends first on every (re)connect -> apply as a REPLACE.
     // Defaults to onChange so older call sites keep the pre-fix (merge-only) behavior.
@@ -41,7 +41,7 @@ internal class StreamingDataSource(
         internal fun buildStreamUrl(
             baseUrl: String,
             clientKey: String,
-            context: Map<String, String>,
+            context: Map<String, Any?>,
         ): String {
             val contextJson = jacksonObjectMapper().writeValueAsBytes(context)
             val encodedContext = contextJson.toByteString().base64()
@@ -71,7 +71,7 @@ internal class StreamingDataSource(
 
     private val json = jacksonObjectMapper()
     private val lock = ReentrantLock()
-    private var context: Map<String, String> = context
+    private var context: Map<String, Any?> = context
     private var job: Job? = null
     private var activeCall: Call? = null
     private var backoffMs = initialBackoffMs
@@ -112,7 +112,7 @@ internal class StreamingDataSource(
         connectionId = null
     }
 
-    fun updateContext(newContext: Map<String, String>) {
+    fun updateContext(newContext: Map<String, Any?>) {
         lock.withLock { context = newContext }
         stop()
         start()

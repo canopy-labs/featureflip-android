@@ -174,7 +174,11 @@ class FeatureflipClientTest {
         server.takeRequest(2, TimeUnit.SECONDS)
         server.takeRequest(2, TimeUnit.SECONDS)
 
-        client.close() // Stop poller
+        // NOT closed here. This used to call close() to "stop the poller" and then
+        // keep using the handle, which quietly depended on a closed client still
+        // evaluating — the bug #2295 fixes. The poller cannot interfere anyway:
+        // pollIntervalMs is 60s and both outstanding requests were drained above,
+        // so the next enqueued response can only be consumed by identify().
 
         // Identify with new context
         val updatedFlags = mapOf("feature" to flagValue(true))
@@ -183,6 +187,8 @@ class FeatureflipClientTest {
         client.identify(mapOf("user_id" to "new-user"))
 
         assertThat(client.boolVariation("feature", false)).isTrue()
+
+        client.close()
     }
 
     // -- SSE delta merge --
