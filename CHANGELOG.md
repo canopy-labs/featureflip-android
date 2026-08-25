@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.1.0 — 2026-08-24
+
+### Fixed
+
+- A permanently rejected batch of analytics events is no longer retried forever. The flush restored the batch on *any* exception, so a 401/403 (rejected SDK key) or 400 (malformed body) would be re-sent indefinitely, starving every later event. Only a retryable failure — 5xx, 429, or a transport fault — is kept now; anything else is dropped and the flush moves on, so one rejected batch cannot block the backlog behind it. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+- A failing events endpoint no longer receives one request per recorded event. A restored batch leaves the buffer at or above the batch size, so every subsequent event re-fired the size trigger. That trigger now backs off for one flush interval after a retryable failure and will not start a second flush while one is running; the periodic job remains the retry vehicle. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+- A flush failure is now reported. It was swallowed by a bare `catch (_: Exception)`, so events could be retried or discarded with nothing written to the log. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+- `stop()` makes a single final attempt and discards the remainder, rather than restoring a batch into a buffer nothing will ever drain again. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+
+### Added
+
+- The event buffer is now bounded, at 1000 events, shedding the oldest first. It previously had no bound at all: because a failed batch was always put back, a sustained outage grew it without limit. The bound is lower than the server SDKs' 10,000 because this is a mobile client. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+
+### Changed
+
+- A flush sends one request per batch instead of one for the whole buffer. A backlog can now reach the buffer bound, and a body that size invites a 413 — which is not retryable, so the path meant to preserve the backlog would have been the one that discarded it. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+
+
 ## 3.0.0 — 2026-08-20
 
 ### Fixed

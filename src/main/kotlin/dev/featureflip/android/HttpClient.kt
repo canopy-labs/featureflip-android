@@ -49,7 +49,9 @@ internal class HttpClient(
 
         callFactory.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw IOException("HTTP ${response.code}")
+                // Typed rather than a bare IOException: the flush needs the status
+                // to decide whether keeping the batch could ever help (#2456).
+                throw EventSendException(response.code)
             }
         }
     }
