@@ -3,7 +3,9 @@ package dev.featureflip.android
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -100,16 +102,33 @@ internal class SharedFeatureflipCore private constructor(
      * Decrements the refcount. When it reaches zero, runs the real shutdown
      * exactly once. Over-release is a no-op — the CAS loop prevents the
      * counter from going below zero and the shutdown guard fires exactly once.
+     *
+     * Returns without waiting for the final event flush, which is handed to
+     * [backgroundScope]. Use [releaseAndAwait] to wait for it (#2478).
      */
     fun release() {
+        if (releaseIsFinal()) shutdown()
+    }
+
+    /**
+     * Suspending [release]: returns only once the final event flush has been
+     * attempted. Prefer this where the caller can suspend and wants the
+     * buffered events actually sent before the core goes away.
+     */
+    suspend fun releaseAndAwait() {
+        if (releaseIsFinal()) shutdownAndAwaitFlush()
+    }
+
+    /**
+     * Decrements the refcount, returning true for the single caller that both
+     * took it to zero and won the shutdown guard.
+     */
+    private fun releaseIsFinal(): Boolean {
         while (true) {
             val current = refCount.get()
-            if (current <= 0) return
+            if (current <= 0) return false
             if (refCount.compareAndSet(current, current - 1)) {
-                if (current - 1 == 0 && isShutDown.compareAndSet(false, true)) {
-                    shutdown()
-                }
-                return
+                return current - 1 == 0 && isShutDown.compareAndSet(false, true)
             }
         }
     }
@@ -204,10 +223,44 @@ internal class SharedFeatureflipCore private constructor(
 
     /**
      * Real shutdown — runs exactly once when the last handle calls [release].
-     * Stops streaming/polling, lifecycle observer, and event processor, and
-     * removes this core from the owning factory map.
+     * Stops streaming/polling and the lifecycle observer, flushes remaining
+     * events, and removes this core from the owning factory map.
+     *
+     * The final flush is handed to [backgroundScope].
+     *
+     * [EventProcessor.stop] posts the remaining batch inline, so running it here
+     * would put a network round-trip on whichever thread called `close()` — on
+     * Android typically the main thread, from `onPause`/`onDestroy` (#2478).
      */
     private fun shutdown() {
+        detachSources()
+        // Inline, so release() returns with the core already refusing events —
+        // stop() used to guarantee that before it moved off this thread.
+        eventProcessor.markClosed()
+        backgroundScope.launch { eventProcessor.stop() }
+        unregisterFromFactory()
+    }
+
+    /**
+     * [shutdown], but waits for the final event flush instead of detaching it.
+     *
+     * Deliberately [NonCancellable]. This is cleanup, and the caller's scope is
+     * routinely dying at exactly this moment — a plain `withContext` throws on
+     * resume when that happens, stranding the core in the factory map with a
+     * refcount already at zero, and skipping the unregister entirely.
+     */
+    private suspend fun shutdownAndAwaitFlush() {
+        detachSources()
+        eventProcessor.markClosed()
+        try {
+            withContext(NonCancellable + Dispatchers.IO) { eventProcessor.stop() }
+        } finally {
+            unregisterFromFactory()
+        }
+    }
+
+    /** Stops streaming/polling and unhooks the lifecycle observer. Never blocks on network. */
+    private fun detachSources() {
         val (stream, poller, observer) = lock.write {
             val s = streamingDataSource
             val p = pollingDataSource
@@ -220,8 +273,9 @@ internal class SharedFeatureflipCore private constructor(
         stream?.stop()
         poller?.stop()
         observer?.remove()
-        eventProcessor.stop()
+    }
 
+    private fun unregisterFromFactory() {
         val map = owningMap
         val key = owningKey
         if (map != null && key != null) {
@@ -337,14 +391,30 @@ internal class SharedFeatureflipCore private constructor(
         eventProcessor.enqueue(event)
     }
 
+    /**
+     * Starts a flush of buffered events and returns immediately.
+     *
+     * [EventProcessor.flush] posts inline, so calling it here would run the
+     * request on the caller's thread — a `NetworkOnMainThreadException` when
+     * that thread is Android's main one (#2478). Use [flushAndAwait] to wait
+     * for the result.
+     */
     fun flush() {
         if (isTestClient) return
-        eventProcessor.flush()
+        backgroundScope.launch { eventProcessor.flush() }
+    }
+
+    /** Suspending [flush]: returns once the flush attempt has completed. */
+    suspend fun flushAndAwait() {
+        if (isTestClient) return
+        withContext(Dispatchers.IO) { eventProcessor.flush() }
     }
 
     // -- Internal test helpers --
 
     internal fun allFlags(): Map<String, FlagValue> = snapshotLock.read { flagSnapshot.toMap() }
+
+    internal fun debugBufferedEventCount(): Int = eventProcessor.bufferedEventCount()
 
     internal fun hasStreamingSource(): Boolean = lock.read { streamingDataSource != null }
 

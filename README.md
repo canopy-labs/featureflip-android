@@ -8,7 +8,7 @@ Android/Kotlin SDK for [Featureflip](https://featureflip.io) — evaluate featur
 
 ```kotlin
 dependencies {
-    implementation("io.featureflip:featureflip-android:3.1.0")
+    implementation("io.featureflip:featureflip-android:3.2.0")
 }
 ```
 
@@ -16,7 +16,7 @@ dependencies {
 
 ```groovy
 dependencies {
-    implementation 'io.featureflip:featureflip-android:3.1.0'
+    implementation 'io.featureflip:featureflip-android:3.2.0'
 }
 ```
 
@@ -102,6 +102,22 @@ client.track("checkout-completed", mapOf("total" to 99.99))
 
 // Force flush pending events
 client.flush()
+```
+
+`flush()` and `close()` are safe to call from the main thread: the request they
+trigger is a blocking network round-trip, so both hand it to a background
+dispatcher and return before it completes. From a coroutine, use the suspending
+variants when you want the events actually sent before moving on, for example
+before signing a user out, or from an application-scoped coroutine. The scope has
+to still be alive: `viewModelScope` is already cancelled by the time
+`ViewModel.onCleared()` runs, so call plain `close()` there.
+
+```kotlin
+// Suspends until the flush attempt has completed
+client.flushAndAwait()
+
+// Suspends until the final flush has been attempted, then releases the handle
+client.closeAndAwait()
 ```
 
 ## Android Lifecycle

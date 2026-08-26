@@ -51,10 +51,26 @@ class FeatureflipClient private constructor(
      * given client key is closed, the shared core stops streaming/polling,
      * removes the lifecycle observer, flushes events, and removes itself from
      * the factory cache. Double-close on the same handle is a no-op.
+     *
+     * Safe to call from the main thread: the final event flush is a blocking
+     * network round-trip and runs on a background dispatcher, so this returns
+     * before it completes. Use [closeAndAwait] from a coroutine when the
+     * buffered events matter more than returning promptly (#2478).
      */
     fun close() {
         if (disposed.compareAndSet(false, true)) {
             core.release()
+        }
+    }
+
+    /**
+     * Suspending [close]: returns only once the final event flush has been
+     * attempted. Mirrors `close()` on the Swift and Flutter SDKs, which are
+     * awaitable for the same reason.
+     */
+    suspend fun closeAndAwait() {
+        if (disposed.compareAndSet(false, true)) {
+            core.releaseAndAwait()
         }
     }
 
@@ -85,7 +101,16 @@ class FeatureflipClient private constructor(
     fun track(eventName: String, metadata: Map<String, Any?>? = null) =
         core.track(eventName, metadata)
 
+    /**
+     * Starts a flush of buffered events and returns immediately.
+     *
+     * Safe to call from the main thread — the request runs on a background
+     * dispatcher (#2478). Use [flushAndAwait] to wait for it.
+     */
     fun flush() = core.flush()
+
+    /** Suspending [flush]: returns once the flush attempt has completed. */
+    suspend fun flushAndAwait() = core.flushAndAwait()
 
     /**
      * Returns the cached [FlagValue] (or `null` if the SDK has no entry for

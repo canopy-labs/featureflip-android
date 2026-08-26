@@ -109,6 +109,23 @@ class EventProcessorTest {
     }
 
     @Test
+    fun `markClosed refuses further events without flushing`() {
+        val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
+        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
+
+        // stop() marks closed inline, but posts the final batch inline too, so the
+        // core hands it to a background scope (#2478). This is the cheap half, kept
+        // on the caller's thread so close() still returns already refusing events.
+        processor.markClosed()
+        processor.enqueue(
+            SdkEvent(type = SdkEventType.Custom, flagKey = "late-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
+        )
+
+        assertThat(processor.bufferedEventCount()).isZero()
+        assertThat(server.requestCount).isZero()
+    }
+
+    @Test
     fun `stop flushes remaining events`() {
         server.enqueue(MockResponse.Builder().code(200).build())
 

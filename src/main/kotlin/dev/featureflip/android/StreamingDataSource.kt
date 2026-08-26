@@ -13,6 +13,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.min
+import java.util.concurrent.ThreadLocalRandom
 
 /**
  * Connects to the evaluation API SSE stream for real-time flag updates.
@@ -37,6 +38,23 @@ internal class StreamingDataSource(
         const val INITIAL_BACKOFF_MS = 1_000L
         const val MAX_BACKOFF_MS = 30_000L
         const val MAX_RETRIES = 5
+
+        /**
+         * Returns a value in [d/2, d] to de-correlate reconnects across many SDK
+         * instances (thundering-herd avoidance after a shared outage).
+         *
+         * Applied to EVERY reconnect, including the first. The drops this absorbs
+         * are fleet-wide — one edge event severs every stream at once (#2457) — so
+         * every client re-enters the backoff together. Delaying by the raw ladder
+         * value there republished the drop's own synchronisation as a reconnect
+         * spike one backoff later (#2508). The band stays strictly positive, so a
+         * stream that fails immediately still cannot busy-loop.
+         */
+        internal fun withJitter(delayMs: Long): Long {
+            if (delayMs <= 0) return delayMs
+            val half = delayMs / 2
+            return half + ThreadLocalRandom.current().nextLong(half + 1)
+        }
 
         internal fun buildStreamUrl(
             baseUrl: String,
@@ -134,7 +152,7 @@ internal class StreamingDataSource(
             }
 
             lock.withLock { retryCount++ }
-            delay(currentBackoff)
+            delay(withJitter(currentBackoff))
             lock.withLock { backoffMs = min(backoffMs * 2, MAX_BACKOFF_MS) }
         }
     }

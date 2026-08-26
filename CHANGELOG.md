@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.2.0 — 2026-08-26
+
+### Added
+
+- `flushAndAwait()` and `closeAndAwait()`: suspending variants that return once the flush attempt has completed. `flush()` and `close()` keep their signatures and are now non-blocking, so use these where the buffered events matter more than returning promptly. Mirrors `flush()`/`close()` on the Swift and Flutter SDKs, which are awaitable for the same reason. ([#2478](https://github.com/canopy-labs/featureflip/issues/2478))
+
+### Changed
+
+- `flush()` and `close()` no longer wait for the flush they start. This is the flip side of the fix above and it is a behaviour change, not only a threading one: a caller already on a background thread — a `Worker`, a `Service`, a JVM shutdown hook — that relied on `close()` having delivered the final batch now returns before the send completes, and loses it if the process exits immediately. Use `closeAndAwait()` (or `flushAndAwait()`) on those paths. ([#2478](https://github.com/canopy-labs/featureflip/issues/2478))
+
+### Fixed
+
+- `flush()` and `close()` no longer perform a blocking network round-trip on the calling thread. Both reached `EventProcessor`'s inline OkHttp `execute()` directly, so on Android's main thread — where `close()` is typically called, from `onPause`/`onDestroy` — they threw `NetworkOnMainThreadException`, crashing the host app rather than dropping an event. Both now hand the request to a background dispatcher and return, matching the background-transition path that already did this correctly. ([#2478](https://github.com/canopy-labs/featureflip/issues/2478))
+
+- An explicit `client.flush()` no longer opens a second drain loop while one is already running. The in-flight latch added for [#2456](https://github.com/canopy-labs/featureflip/issues/2456) guarded only the batch-size trigger, so the periodic flush, an explicit `client.flush()` and a size-triggered flush could enter the loop together — two request streams against an endpoint the backoff gate exists to protect, and worse, a success in one cleared the gate a failure in the other had just armed, re-opening the one-request-per-evaluation behaviour outright. A caller arriving while a drain is running now waits for it and returns, matching the js and node SDKs. Shutdown still bypasses coalescing, because it is the last drain there will ever be. ([#2477](https://github.com/canopy-labs/featureflip/issues/2477))
+
+- The first SSE reconnect after a healthy stream drops is now jittered to `[d/2, d]`, like every other backoff level. The drops this absorbs are fleet-wide — a single edge event severs every stream at once — so every client re-entered the backoff together and waited an identical delay, republishing the drop's own synchronisation as a reconnect spike one backoff later. Measured in production: a drop spread across 2.5–3.0 ms produced a reconnect spread of 26–46 ms. The delay never exceeds the previous one and stays strictly positive, so a stream that fails immediately still cannot busy-loop. ([#2508](https://github.com/canopy-labs/featureflip/issues/2508))
+
 ## 3.1.0 — 2026-08-24
 
 ### Fixed
@@ -16,7 +34,6 @@
 ### Changed
 
 - A flush sends one request per batch instead of one for the whole buffer. A backlog can now reach the buffer bound, and a body that size invites a 413 — which is not retryable, so the path meant to preserve the backlog would have been the one that discarded it. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
-
 
 ## 3.0.0 — 2026-08-20
 
@@ -80,22 +97,22 @@
   **Migration:**
 
   Before (instance-based):
-  ```kotlin
+  ``kotlin
   val client = FeatureflipClient.create(config)
   client.initialize()
-  ```
+  ``
 
   Before (singleton):
-  ```kotlin
+  ``kotlin
   FeatureflipClient.configure(config)
   FeatureflipClient.shared().initialize()
-  ```
+  ``
 
   After:
-  ```kotlin
+  ``kotlin
   val client = FeatureflipClient.get(config)
   client.initialize()
-  ```
+  ``
 
   The factory IS the singleton — calling `get()` multiple times with the same `clientKey` always returns handles sharing one underlying shared client. No more `configure()` / `shared()` ceremony.
 
