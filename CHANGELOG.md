@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.2.1 — 2026-09-19
+
+### Fixed
+
+- `track()` events now reach the server. They were posted to `/v1/sdk/events`, which accepts server SDK keys only — so every batch came back `401`, which the event processor correctly classifies as permanent and discards. Nothing was retried and nothing was logged above debug, so `track()` was a public API that silently did nothing. Events now post to `/v1/client/events`, the client-surface ingest this SDK's other calls already use. `identify()` and flag evaluation were never affected — `identify()` round-trips `/v1/client/identify`, and evaluations are recorded server-side on this SDK's behalf. Requires an Evaluation API that serves that endpoint; against an older one, events are dropped exactly as before. (#3069)
+- The polling fallback no longer ends the SSE stream. After five consecutive failures — about 31 seconds of unreachability, so an edge incident, a bad deploy or a network partition — this SDK stopped the streaming source and cleared its reference before starting the poller, and nothing ever re-opened it: the app lost real-time updates for the rest of its life and polled `/v1/client/evaluate` every 30 seconds until it was killed. Flag changes, kill switches included, then arrived up to a poll interval late. Polling is now additive — it covers the outage while the stream keeps retrying underneath at the capped backoff, and the next delivered configuration frame retires the poller. Retiring it matters as much as arming it: a poller left running beside a healthy stream reverts SSE deltas with its own whole-store replaces. (#3075)
+- The consecutive-failure counter now resets on a delivered configuration frame rather than on the connection handshake. A server that accepts a connection and then closes it without sending anything satisfied the handshake on every cycle, so the counter never accumulated — and with the stream now retrying indefinitely, that is the case where the fallback above would never arm at all. (#3075)
+- Three races around the fallback's lifetime are closed: a poll already in flight when the poller was retired could land afterwards and revert the stream's snapshot; a fallback callback arriving after `close()` could start a poller nothing could stop; and returning to the foreground could resurrect a just-retired one. (#3075)
+
 ## 3.2.0 — 2026-08-26
 
 ### Added

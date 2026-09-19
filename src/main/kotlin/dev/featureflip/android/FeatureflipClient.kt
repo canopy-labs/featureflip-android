@@ -136,6 +136,8 @@ class FeatureflipClient private constructor(
 
     internal fun handleStreamingFallback() = core.handleStreamingFallback()
 
+    internal fun stopFallbackPolling() = core.stopFallbackPolling()
+
     internal fun hasStreamingSource(): Boolean = core.hasStreamingSource()
 
     internal fun hasPollingSource(): Boolean = core.hasPollingSource()

@@ -85,6 +85,7 @@ class StreamingDataSourceTest {
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
             onChange = {},
+            onSnapshot = {},
             scope = kotlinx.coroutines.CoroutineScope(
                 kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob()
             ),
@@ -154,11 +155,15 @@ class StreamingDataSourceTest {
     }
 
     @Test
-    fun `stream that stays down triggers onMaxRetriesReached (never terminal)`() {
+    fun `stream that stays down arms the fallback once and keeps retrying underneath`() {
+        // The fallback is ADDITIVE, never terminal (#3075). Returning out of the
+        // connect loop at the cap left the app blind to real-time updates — kill
+        // switches included — until it was restarted, after ~31s of unreachability.
         val server = MockWebServer()
-        repeat(8) { server.enqueue(MockResponse.Builder().code(500).build()) }
+        repeat(40) { server.enqueue(MockResponse.Builder().code(500).build()) }
         server.start()
 
+        val armings = java.util.concurrent.atomic.AtomicInteger(0)
         val latch = CountDownLatch(1)
         val ds = StreamingDataSource(
             baseUrl = server.url("/").toString().trimEnd('/'),
@@ -166,7 +171,7 @@ class StreamingDataSourceTest {
             context = mapOf("user_id" to "u1"),
             onChange = {},
             onSnapshot = {},
-            onMaxRetriesReached = { latch.countDown() },
+            onFallbackToPolling = { armings.incrementAndGet(); latch.countDown() },
             scope = kotlinx.coroutines.CoroutineScope(
                 kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
             ),
@@ -175,11 +180,171 @@ class StreamingDataSourceTest {
         ds.start()
 
         val fired = latch.await(5, TimeUnit.SECONDS)
+        assertThat(fired)
+            .`as`("onFallbackToPolling should fire so the core can start polling")
+            .isTrue()
+
+        // Keep going well past the cap: the connect loop must still be reconnecting.
+        val attemptsAtCap = server.requestCount
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (server.requestCount <= StreamingDataSource.MAX_RETRIES + 2 &&
+            System.nanoTime() < deadline
+        ) {
+            Thread.sleep(10)
+        }
+        val attemptsAfter = server.requestCount
         ds.stop()
         server.close()
 
-        assertThat(fired)
-            .`as`("onMaxRetriesReached should fire so the core can fall back to polling")
+        assertThat(attemptsAfter)
+            .`as`(
+                "the stream must keep retrying past the cap (attempts at arming: %d)",
+                attemptsAtCap,
+            )
+            .isGreaterThan(StreamingDataSource.MAX_RETRIES)
+        assertThat(armings.get())
+            .`as`("the fallback arms once per outage, not once per retry")
+            .isEqualTo(1)
+    }
+
+    @Test
+    fun `a recovered stream retires the fallback poller on its first delivered frame`() {
+        val server = MockWebServer()
+        repeat(StreamingDataSource.MAX_RETRIES) {
+            server.enqueue(MockResponse.Builder().code(500).build())
+        }
+        // Then a live stream that actually delivers the connect snapshot.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .body("event: flags-updated\ndata: ${fullSnapshotJson("flag-a")}\n\n")
+                .build(),
+        )
+        repeat(20) { server.enqueue(MockResponse.Builder().code(500).build()) }
+        server.start()
+
+        val armed = CountDownLatch(1)
+        val recovered = CountDownLatch(1)
+        val recoveries = java.util.concurrent.atomic.AtomicInteger(0)
+        val ds = StreamingDataSource(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            clientKey = "key",
+            context = mapOf("user_id" to "u1"),
+            onChange = {},
+            onSnapshot = {},
+            onFallbackToPolling = { armed.countDown() },
+            onStreamRecovered = { recoveries.incrementAndGet(); recovered.countDown() },
+            scope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+            ),
+            initialBackoffMs = 1L,
+        )
+        ds.start()
+
+        val didArm = armed.await(5, TimeUnit.SECONDS)
+        val didRecover = recovered.await(5, TimeUnit.SECONDS)
+        ds.stop()
+        server.close()
+
+        assertThat(didArm).`as`("the fallback should arm while the stream is down").isTrue()
+        assertThat(didRecover)
+            .`as`("a delivered frame must retire the fallback poller")
             .isTrue()
+        assertThat(recoveries.get())
+            .`as`("recovery is signalled once per outage, not once per frame")
+            .isEqualTo(1)
+    }
+
+    @Test
+    fun `a stream that opens but delivers nothing still arms the fallback`() {
+        // Regression: resetting the retry counter on the 200 rather than on a
+        // delivered frame let an accept-then-close server clear it every cycle, so
+        // the budget was never exhausted, the fallback never armed, and the app saw
+        // nothing at all for the whole outage (#3074).
+        val server = MockWebServer()
+        repeat(40) {
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .setHeader("Content-Type", "text/event-stream")
+                    .body("")
+                    .build(),
+            )
+        }
+        server.start()
+
+        val armed = CountDownLatch(1)
+        val ds = StreamingDataSource(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            clientKey = "key",
+            context = mapOf("user_id" to "u1"),
+            onChange = {},
+            onSnapshot = {},
+            onFallbackToPolling = { armed.countDown() },
+            scope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+            ),
+            initialBackoffMs = 1L,
+        )
+        ds.start()
+
+        val didArm = armed.await(5, TimeUnit.SECONDS)
+        ds.stop()
+        server.close()
+
+        assertThat(didArm)
+            .`as`("a 200 that delivers no frame is not a recovery")
+            .isTrue()
+    }
+
+    @Test
+    fun `a stream that only ever sends connection-ready still arms the fallback`() {
+        // connection-ready is the client stream's FIRST frame and carries no config —
+        // a ~40-byte handshake. Counting it as a recovery would let a server that
+        // accepts, greets and dies reset the retry budget every cycle, which is
+        // exactly the accept-then-close hole #3074 closed. The fleet keys this on
+        // delivered CONFIG (js and java on `sync`, go on its first complete frame,
+        // which for the server stream IS `sync`), so the mobile SDKs key on
+        // `flags-updated`.
+        val server = MockWebServer()
+        repeat(40) {
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(200)
+                    .setHeader("Content-Type", "text/event-stream")
+                    .body("event: connection-ready\ndata: {\"connectionId\":\"c1\"}\n\n")
+                    .build(),
+            )
+        }
+        server.start()
+
+        val armed = CountDownLatch(1)
+        val recoveries = java.util.concurrent.atomic.AtomicInteger(0)
+        val ds = StreamingDataSource(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            clientKey = "key",
+            context = mapOf("user_id" to "u1"),
+            onChange = {},
+            onSnapshot = {},
+            onFallbackToPolling = { armed.countDown() },
+            onStreamRecovered = { recoveries.incrementAndGet() },
+            scope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
+            ),
+            initialBackoffMs = 1L,
+        )
+        ds.start()
+
+        val didArm = armed.await(5, TimeUnit.SECONDS)
+        ds.stop()
+        server.close()
+
+        assertThat(didArm)
+            .`as`("a greeting frame carrying no config is not a recovery")
+            .isTrue()
+        assertThat(recoveries.get())
+            .`as`("connection-ready must never retire the fallback poller")
+            .isZero()
     }
 }

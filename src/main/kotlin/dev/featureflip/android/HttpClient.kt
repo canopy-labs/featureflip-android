@@ -41,7 +41,10 @@ internal class HttpClient(
         val body = RecordEventsRequest(events)
         val requestBody = json.writeValueAsString(body).toRequestBody(mediaType)
         val request = Request.Builder()
-            .url("$baseUrl/v1/sdk/events")
+            // The CLIENT surface, like every other call this SDK makes. /v1/sdk/events accepts
+            // server keys only, so it answered this one with a 401 — which the event processor
+            // classifies as permanent, discarding every batch (#3069).
+            .url("$baseUrl/v1/client/events")
             .header("Content-Type", "application/json")
             .header("Authorization", clientKey)
             .post(requestBody)

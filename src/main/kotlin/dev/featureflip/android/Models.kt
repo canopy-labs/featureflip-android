@@ -29,7 +29,7 @@ internal data class EvaluateResponse(
 )
 
 /**
- * An analytics event sent to /v1/sdk/events.
+ * An analytics event sent to /v1/client/events.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 internal data class SdkEvent(

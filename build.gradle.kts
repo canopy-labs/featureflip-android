@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.4.10"
+    kotlin("jvm") version "2.4.20"
     `java-library`
     `maven-publish`
     signing
@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "io.featureflip"
-version = "3.2.0"
+version = "3.2.1"
 
 java {
     toolchain {

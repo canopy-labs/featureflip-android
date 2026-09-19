@@ -440,6 +440,14 @@ internal class SharedFeatureflipCore private constructor(
     }
 
     internal fun startDataSource() {
+        // Idempotent, and that is load-bearing rather than defensive (#3075). An
+        // orphaned streaming source used to stop itself at the retry cap; it now
+        // retries forever AND keeps calling back into this core, so one left running
+        // by a second startDataSource() could retire the live source's fallback poller
+        // mid-outage and leave the app uncovered by either. FeatureflipClient
+        // .startDataSource() exists for tests that restart after close, so "runs once"
+        // cannot rest on a comment.
+        if (lock.read { streamingDataSource } != null) return
         val ctx = lock.read { currentContext }
         if (config.streaming) {
             val source = StreamingDataSource(
@@ -449,8 +457,9 @@ internal class SharedFeatureflipCore private constructor(
                 onChange = { flags -> handleStreamingUpdate(flags) },
                 // First flags-updated after (re)connect is the full snapshot -> REPLACE.
                 onSnapshot = { flags -> handleFullUpdate(flags) },
-                // Stream exhausted its retries -> fall back to polling (retries forever).
-                onMaxRetriesReached = { handleStreamingFallback() },
+                // Stream exhausted its retries -> poll ALONGSIDE it until it recovers.
+                onFallbackToPolling = { handleStreamingFallback() },
+                onStreamRecovered = { stopFallbackPolling() },
             )
             source.start()
             lock.write { streamingDataSource = source }
@@ -474,24 +483,54 @@ internal class SharedFeatureflipCore private constructor(
     }
 
     /**
-     * Streaming exhausted its retries: tear down the dormant streaming source
-     * before falling back to polling (which retries forever). Stopping and
-     * nulling the stream is what keeps a later [handleForeground]/[identify]
-     * from resurrecting it alongside the poller — two live sources racing
-     * stale deltas over fresh poll snapshots. Mirrors Flutter's
-     * `_handleStreamingFallback`. Called from the [StreamingDataSource]
-     * `onMaxRetriesReached` callback (safe to call from within it: `stop()`
-     * only cancels the coroutine, it does not join).
+     * Streaming exhausted its retries: start polling to cover the outage. Called
+     * from the [StreamingDataSource] `onFallbackToPolling` callback.
+     *
+     * The streaming source is deliberately NOT stopped or nulled (#3075). Nulling it
+     * is what used to make the fallback permanent — nothing would ever have restarted
+     * streaming, so the app lost real-time updates until it was killed. It kept
+     * [handleForeground]/[identify] from resurrecting a *dormant* stream beside the
+     * poller (#1902), but the stream is no longer dormant: it keeps retrying
+     * underneath, so those two call sites act on the one live source that already
+     * exists and cannot create a second. [startDataSource] is the only construction
+     * site and runs once.
      */
     internal fun handleStreamingFallback() {
-        val stream = lock.write {
-            val s = streamingDataSource
-            streamingDataSource = null
-            s
-        }
-        stream?.stop()
+        if (!isLiveStreamingSource()) return
         startPolling()
     }
+
+    /**
+     * Retires a polling fallback once the stream is carrying configuration again.
+     * Clears the reference as well as stopping the poller, so a later outage falls
+     * back again — [startPolling] refuses to start a second poller while one is
+     * referenced, and a dead one parked there would leave the next outage uncovered.
+     *
+     * A poller the caller configured (`streaming = false`) is never reached: this
+     * only runs off `onStreamRecovered`, which only fires after `onFallbackToPolling`
+     * did, and neither exists unless a streaming source was built.
+     */
+    internal fun stopFallbackPolling() {
+        if (!isLiveStreamingSource()) return
+        val poller = lock.write {
+            val p = pollingDataSource
+            pollingDataSource = null
+            p
+        }
+        poller?.stop()
+    }
+
+    /**
+     * Whether this core still owns a streaming source, i.e. whether a callback
+     * arriving from one is still relevant.
+     *
+     * Both fallback callbacks come from a coroutine that keeps running until it
+     * observes cancellation, so one can arrive after [detachSources] has nulled the
+     * reference. Acting on it then would start a poller nothing holds a reference to —
+     * it would poll for the rest of the process's life — or retire a poller this core
+     * no longer has any stream to replace.
+     */
+    private fun isLiveStreamingSource(): Boolean = lock.read { streamingDataSource } != null
 
     private fun handleStreamingUpdate(delta: Map<String, FlagValue>) {
         val merged = mergeSnapshot(delta)
@@ -518,9 +557,11 @@ internal class SharedFeatureflipCore private constructor(
 
     private fun handleForeground() {
         backgroundScope.launch {
-            val (stream, poller) = lock.read { streamingDataSource to pollingDataSource }
-            stream?.start()
-            poller?.start()
+            lock.read { streamingDataSource }?.start()
+            // Re-read under the lock rather than reusing a value captured alongside
+            // the stream: stopFallbackPolling() can retire the poller in between, and
+            // starting one nothing holds a reference to leaves it polling forever.
+            lock.read { pollingDataSource }?.start()
         }
     }
 

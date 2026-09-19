@@ -343,10 +343,10 @@ class FeatureflipClientTest {
         client.close()
     }
 
-    // -- Streaming -> polling fallback tears down the dormant stream --
+    // -- Streaming -> polling fallback is additive, and retired on recovery --
 
     @Test
-    fun `streaming fallback stops and nulls the stream before starting the poller`() {
+    fun `streaming fallback adds a poller and keeps the stream, then retires the poller on recovery`() {
         val evaluateBody = makeEvaluateResponseBody(mapOf("feature" to flagValue(true)))
 
         // Route by path: keep the SSE connect idle-open (headers sent, body delayed)
@@ -373,16 +373,36 @@ class FeatureflipClientTest {
         // streaming = true starts a live SSE source during initialize.
         assertThat(client.hasStreamingSource()).isTrue()
 
-        // Simulate the stream exhausting its retries (the onMaxRetriesReached callback).
+        // Simulate the stream exhausting its retries (the onFallbackToPolling callback).
         client.handleStreamingFallback()
 
-        // The dormant stream must be torn down so a later foreground/identify cannot
-        // resurrect it alongside the poller (both live -> stale-overwrite flicker).
+        // The stream is KEPT: it is still retrying underneath, and polling only covers
+        // the outage until it comes back. Nulling it here is what used to make the
+        // fallback permanent — nothing would ever have restarted streaming (#3075).
         assertThat(client.hasStreamingSource())
-            .`as`("streaming source should be stopped and nulled on fallback")
-            .isFalse()
+            .`as`("streaming source must survive the fallback so it can still recover")
+            .isTrue()
         assertThat(client.hasPollingSource())
-            .`as`("polling should take over after fallback")
+            .`as`("polling should cover the outage")
+            .isTrue()
+
+        // A second arming must not leak a second poller.
+        client.handleStreamingFallback()
+        assertThat(client.hasPollingSource()).isTrue()
+
+        // Simulate the stream delivering a frame again (the onStreamRecovered callback).
+        client.stopFallbackPolling()
+
+        assertThat(client.hasPollingSource())
+            .`as`("the fallback poller must be retired once the stream recovers")
+            .isFalse()
+        assertThat(client.hasStreamingSource()).isTrue()
+
+        // The reference is cleared too, so a later outage falls back again rather than
+        // finding a dead poller parked there.
+        client.handleStreamingFallback()
+        assertThat(client.hasPollingSource())
+            .`as`("a second outage must be covered by a fresh poller")
             .isTrue()
 
         client.close()

@@ -8,7 +8,7 @@ Android/Kotlin SDK for [Featureflip](https://featureflip.io) — evaluate featur
 
 ```kotlin
 dependencies {
-    implementation("io.featureflip:featureflip-android:3.2.0")
+    implementation("io.featureflip:featureflip-android:3.2.1")
 }
 ```
 
@@ -16,7 +16,7 @@ dependencies {
 
 ```groovy
 dependencies {
-    implementation 'io.featureflip:featureflip-android:3.2.0'
+    implementation 'io.featureflip:featureflip-android:3.2.1'
 }
 ```
 
@@ -103,6 +103,8 @@ client.track("checkout-completed", mapOf("total" to 99.99))
 // Force flush pending events
 client.flush()
 ```
+
+Featureflip counts each event name, per environment. The metadata you pass is transmitted with the event but is not stored, and event counts are not surfaced in the app or API.
 
 `flush()` and `close()` are safe to call from the main thread: the request they
 trigger is a blocking network round-trip, so both hand it to a background

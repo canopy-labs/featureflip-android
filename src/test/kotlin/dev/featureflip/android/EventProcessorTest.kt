@@ -43,7 +43,7 @@ class EventProcessorTest {
         processor.flush()
 
         val request = server.takeRequest()
-        assertThat(request.requestLine).contains("/v1/sdk/events")
+        assertThat(request.requestLine).contains("/v1/client/events")
 
         val body: Map<String, Any> = json.readValue(request.body!!.utf8())
         @Suppress("UNCHECKED_CAST")

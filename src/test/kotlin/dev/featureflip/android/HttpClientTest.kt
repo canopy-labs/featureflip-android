@@ -94,7 +94,7 @@ class HttpClientTest {
         client.postEvents(events)
 
         val request = server.takeRequest()
-        assertThat(request.requestLine).contains("/v1/sdk/events")
+        assertThat(request.requestLine).contains("/v1/client/events")
         assertThat(request.headers["Authorization"]).isEqualTo("test-key")
     }
 

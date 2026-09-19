@@ -90,4 +90,36 @@ class PollingDataSourceTest {
         val body = request.body!!.utf8()
         assertThat(body).contains("user-2")
     }
+
+    @Test
+    fun `a poll already on the wire does not deliver after stop`() {
+        // pollOnce() is not a suspend function, so cancelling the job cannot interrupt
+        // it: without an explicit guard, httpClient.evaluate() completes and onChange()
+        // fires regardless. That is only harmless while a poller is stopped alongside
+        // everything else — #3075 retires the fallback poller while the recovered
+        // stream is live, so a late response would REPLACE the store on top of the
+        // stream's fresher snapshot and stay wrong until the flag next changed.
+        val flags = mapOf("feature" to FlagValue(value = true, variation = "v1", reason = "RULE"))
+        server.enqueue(MockResponse.Builder().body(makeResponseBody(flags)).build())
+
+        val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
+        val received = CopyOnWriteArrayList<Map<String, FlagValue>>()
+
+        val poller = PollingDataSource(
+            httpClient = httpClient,
+            context = mapOf("user_id" to "user-1"),
+            intervalMs = 60_000,
+            onChange = { received.add(it) },
+        )
+
+        poller.stop()
+        poller.pollOnce()
+
+        assertThat(received)
+            .`as`("a response that arrives after stop() must not reach the store")
+            .isEmpty()
+        assertThat(server.requestCount)
+            .`as`("the request itself is not recallable — only its delivery is suppressed")
+            .isEqualTo(1)
+    }
 }
