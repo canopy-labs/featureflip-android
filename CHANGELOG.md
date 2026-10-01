@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.2 — 2026-10-01
+
+### Changed
+
+- Dependency updates: `jackson-databind` and `jackson-module-kotlin` 2.22.2 → 2.22.3. No API or behavior changes.
+
 ## 3.2.1 — 2026-09-19
 
 ### Fixed
