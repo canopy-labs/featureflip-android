@@ -155,6 +155,35 @@ class StreamingDataSourceTest {
     }
 
     @Test
+    fun `restarting a running stream closes the connection it replaces`() {
+        // start() on a live stream used to cancel only the coroutine. The connection it
+        // had open, blocked in a read, stayed open beside its replacement, and stop()
+        // only knew the newest call, so nothing ever closed it.
+        HeldOpenStreamServer(fullSnapshotJson("flag-a")).use { server ->
+            val ds = StreamingDataSource(
+                baseUrl = server.baseUrl,
+                clientKey = "key",
+                context = mapOf("user_id" to "u1"),
+                onChange = {},
+                onSnapshot = {},
+            )
+            ds.start()
+            assertThat(server.awaitUntil { server.streams.size == 1 }).isTrue()
+
+            ds.start()
+            assertThat(server.awaitUntil { server.streams.size == 2 }).isTrue()
+            assertThat(server.awaitUntil { server.streams[0].isClosed })
+                .`as`("the replaced connection must be closed, not left reading")
+                .isTrue()
+
+            ds.stop()
+            assertThat(server.awaitUntil { server.openStreams() == 0 })
+                .`as`("stop() must leave no connection open")
+                .isTrue()
+        }
+    }
+
+    @Test
     fun `stream that stays down arms the fallback once and keeps retrying underneath`() {
         // The fallback is ADDITIVE, never terminal (#3075). Returning out of the
         // connect loop at the cap left the app blind to real-time updates — kill

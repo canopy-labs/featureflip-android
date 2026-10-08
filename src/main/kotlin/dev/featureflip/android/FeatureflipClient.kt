@@ -118,12 +118,16 @@ class FeatureflipClient private constructor(
      * and `prerequisiteKey` — rather than just the unwrapped value returned
      * by [boolVariation] / [stringVariation] / etc. Mirrors the `flagDetail`
      * accessor on the browser and Swift SDKs.
+     *
+     * Counts as a read for [FeatureflipConfig.sendEvaluationEvents], like the
+     * typed accessors. It does not notify inspectors.
      */
     fun flagDetail(key: String): FlagValue? =
-        if (disposed.get()) null else core.allFlags()[key]
+        if (disposed.get()) null else core.flagDetail(key)
 
     // -- Internal test helpers (package-private access via Kotlin internal) --
 
+    // Never reports a read: only the typed accessors and flagDetail do.
     internal fun allFlags(): Map<String, FlagValue> =
         if (disposed.get()) emptyMap() else core.allFlags()
 
@@ -165,7 +169,7 @@ class FeatureflipClient private constructor(
          *
          * The [config] is honored only on the first call for a given client
          * key. Subsequent callers that pass meaningfully different options
-         * (baseUrl, streaming, intervals, timeouts) will see a warning logged
+         * (baseUrl, streaming, intervals, timeouts, read reporting) will see a warning logged
          * via [System.err]; the cached core's config is preserved.
          *
          * Concurrent calls to `get(sameKey)` from multiple threads result in

@@ -18,9 +18,27 @@ internal class HttpClient(
     private val baseUrl: String,
     private val clientKey: String,
     callFactory: Call.Factory? = null,
+    /**
+     * Whether this SDK reports the flags its app reads (`sendEvaluationEvents`). When
+     * true, evaluate and identify tell the server so, and it stops recording every flag
+     * it serves on this client's behalf. Defaults to false: a construction site that
+     * forgets it over-counts reads, which is the safe direction. Under-counting is what
+     * would let the archive guard pass a flag that live code still reads.
+     */
+    reportsEvaluations: Boolean = false,
 ) {
+    internal companion object {
+        const val REPORTS_EVALUATIONS_HEADER = "X-Featureflip-Reports-Evaluations"
+    }
+
     private val json: ObjectMapper = jacksonObjectMapper()
     private val mediaType = "application/json".toMediaType()
+
+    // Only on evaluate and identify, the two calls the server records served flags for.
+    // Never on events (those ARE the reads), and never on the SSE stream, which
+    // StreamingDataSource opens without this class. Built once, not per request.
+    private val readReportingHeaders: Map<String, String> =
+        if (reportsEvaluations) mapOf(REPORTS_EVALUATIONS_HEADER to "1") else emptyMap()
 
     private val defaultClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -30,11 +48,18 @@ internal class HttpClient(
     private val callFactory: Call.Factory = callFactory ?: defaultClient
 
     fun evaluate(context: Map<String, Any?>, timeoutMs: Long? = null): EvaluateResponse {
-        return post("/v1/client/evaluate", mapOf("context" to context), timeoutMs)
+        return post("/v1/client/evaluate", mapOf("context" to context), timeoutMs, extraHeaders = readReportingHeaders)
     }
 
     fun identify(context: Map<String, Any?>, connectionId: String? = null): EvaluateResponse {
-        return post("/v1/client/identify", mapOf("context" to context), extraHeaders = connectionId?.let { mapOf("X-Connection-Id" to it) })
+        // Merged, not replaced: identify already carries X-Connection-Id so the server
+        // can re-target this client's SSE stream.
+        val headers = if (connectionId != null) {
+            readReportingHeaders + ("X-Connection-Id" to connectionId)
+        } else {
+            readReportingHeaders
+        }
+        return post("/v1/client/identify", mapOf("context" to context), extraHeaders = headers)
     }
 
     fun postEvents(events: List<SdkEvent>) {

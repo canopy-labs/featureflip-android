@@ -1,5 +1,23 @@
 # Changelog
 
+## 3.3.0 — 2026-10-07
+
+### Added
+
+- The SDK now reports the flags your app reads. Each call to `boolVariation`, `stringVariation`, `numberVariation`, `jsonVariation` or `flagDetail` can queue an `Evaluation` event, which goes to `/v1/client/events` in the same batches as `track()` events. Reading a key the SDK doesn't have counts too, with no variation. A flag goes out at most once an hour per variation and user, however often it's read, and again each time the app comes back to the foreground. A repeat read costs no allocation and no network. Loading flags, streaming updates, `identify()` and inspectors aren't reads. That lets Featureflip archive a client-side flag nothing reads any more without forcing it. (#3545)
+- `sendEvaluationEvents` on `FeatureflipConfig`, default `true`. While it's on, calls to `/v1/client/evaluate` and `/v1/client/identify` send `X-Featureflip-Reports-Evaluations: 1`, and the server stops counting every flag it sends as evaluated. Set it to `false` and neither the reads nor the header are sent, so the server counts every served flag again, as it did for earlier versions. Like the other options, it's fixed by the first `get()` for a client key, and a later `get()` with a different value logs a warning and keeps the first. Against an Evaluation API that predates the header nothing breaks. The server keeps counting served flags and the reads add to them. (#3545)
+
+### Changed
+
+- Evaluation counts for client-side flags changed meaning. They used to count every flag sent to the device on each launch and `identify()`. Now they count reads, deduplicated hourly, so expect a visible drop as your users upgrade. (#3545)
+- Client-side flags are now visible to staleness detection. A flag the app is sent but never reads can start showing as stale, and on Team plans and above that can mean a batch of stale-flag notice emails. The numbers are right. They're just new. (#3545)
+
+### Fixed
+
+- On a real device the SDK now registers for the app's foreground and background events. The registration used to fail without an error, so the flush on going to the background never ran, and streaming neither paused in the background nor resumed when the app came back.  An error thrown while handling one of those events is now contained and logged to `System.err` instead of reaching the app's main thread. (#3545)
+- Apps no longer hold a second streaming connection open from launch. Android reports the app as in the foreground the moment the SDK registers, and the SDK reconnected the stream it had just opened without closing the first one, which then stayed open in the background too. The SDK now resumes on foreground only what it paused on background, and a restarted stream always closes the connection it replaces. (#3545)
+- Apps minified with R8 or ProGuard now work with no rules of their own. The jar ships its own keep rules, which both tools apply automatically. Without them a minified app got every flag's default value, sent its events as empty batches, and never saw the app go to the background or come back. Any keep rules you added for the SDK yourself can stay. (#3545)
+
 ## 3.2.2 — 2026-10-01
 
 ### Changed

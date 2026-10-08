@@ -8,7 +8,7 @@ Android/Kotlin SDK for [Featureflip](https://featureflip.io) — evaluate featur
 
 ```kotlin
 dependencies {
-    implementation("io.featureflip:featureflip-android:3.2.2")
+    implementation("io.featureflip:featureflip-android:3.3.0")
 }
 ```
 
@@ -16,7 +16,7 @@ dependencies {
 
 ```groovy
 dependencies {
-    implementation 'io.featureflip:featureflip-android:3.2.2'
+    implementation 'io.featureflip:featureflip-android:3.3.0'
 }
 ```
 
@@ -54,6 +54,7 @@ val config = FeatureflipConfig(
     flushIntervalMs = 30_000,                       // Event flush interval in ms
     flushBatchSize = 100,                           // Events per batch
     initTimeoutMs = 10_000,                         // Max ms to wait for initialization
+    sendEvaluationEvents = true,                    // Report which flags the app reads (default)
 )
 ```
 
@@ -121,6 +122,25 @@ client.flushAndAwait()
 // Suspends until the final flush has been attempted, then releases the handle
 client.closeAndAwait()
 ```
+
+## Read reporting
+
+The SDK tells Featureflip which flags your app actually reads. Without reads, a client-side flag looks used whenever it is sent to a device. With them, a flag nothing reads any more can be archived without forcing it, and staleness detection treats client-side flags like server-side ones.
+
+- A read is a call to `boolVariation`, `stringVariation`, `numberVariation`, `jsonVariation` or `flagDetail`. Reading a key the SDK doesn't have counts too.
+- Loading flags, streaming updates, `identify()` and inspectors aren't reads.
+- A flag is reported at most once an hour per variation and user, however often you read it, and again each time the app comes back to the foreground. A repeat read costs no allocation and no network. Reports go out in the same batches as `track()` events, including the flush when the app goes to the background.
+
+To turn it off:
+
+```kotlin
+val config = FeatureflipConfig(
+    clientKey = "your-client-sdk-key",
+    sendEvaluationEvents = false,
+)
+```
+
+With it off, Featureflip counts every flag it sends to the app as evaluated, as it did before 3.3.0, so to Featureflip a flag this app is sent never looks unused.
 
 ## Android Lifecycle
 

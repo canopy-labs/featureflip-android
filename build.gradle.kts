@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "io.featureflip"
-version = "3.2.2"
+version = "3.3.0"
 
 java {
     toolchain {
@@ -39,7 +39,22 @@ dependencies {
 }
 
 tasks.test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        // Timing runs flake on shared CI runners; `./gradlew benchmark` runs them by hand.
+        excludeTags("benchmark")
+    }
+}
+
+// Read-path timing (#3545): repeat boolVariation, read reporting on vs off. Not part
+// of `test` or `build`. Run: ./gradlew benchmark
+val benchmark by tasks.registering(Test::class) {
+    description = "Times the flag read path with read reporting on vs off (manual, not a CI gate)."
+    group = "verification"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    useJUnitPlatform { includeTags("benchmark") }
+    outputs.upToDateWhen { false }
+    testLogging { showStandardStreams = true }
 }
 
 kotlin {

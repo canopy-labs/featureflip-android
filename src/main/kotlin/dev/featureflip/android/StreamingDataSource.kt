@@ -125,6 +125,12 @@ internal class StreamingDataSource(
     fun start() {
         job?.cancel()
         lock.withLock {
+            // Cancelling the job does not end a connection that is already reading: the
+            // SSE read blocks in I/O, which coroutine cancellation cannot interrupt. Left
+            // open, the old connection outlives its replacement and stop(), which only
+            // knows the newest call, never closes it.
+            activeCall?.cancel()
+            activeCall = null
             retryCount = 0
             backoffMs = initialBackoffMs
             sseClient?.dispatcher?.executorService?.shutdown()

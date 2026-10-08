@@ -26,4 +26,20 @@ data class FeatureflipConfig(
      * from `configsEqual` — functions are not structurally comparable.
      */
     val inspectors: List<EvaluationInspector> = emptyList(),
+    /**
+     * Report the flags this app reads, so Featureflip can tell a flag that is still in
+     * use from one whose code is gone. Each read through a typed accessor or
+     * [FeatureflipClient.flagDetail] queues at most one `Evaluation` event per
+     * (flag, variation, user) per hour, sent in the same batches as `track()` events.
+     * The first read after each return to the foreground is reported again. A repeat
+     * read costs no allocation and no I/O.
+     *
+     * When false, no reads are reported, and evaluate and identify stop telling the
+     * server that this client reports them. The server then counts every flag it sends
+     * as evaluated, as it does for SDK versions before 3.3.0.
+     *
+     * Compared by `configsEqual`: a later `get()` for the same client key with a
+     * different value logs a warning and keeps the first value, like every other option.
+     */
+    val sendEvaluationEvents: Boolean = true,
 )

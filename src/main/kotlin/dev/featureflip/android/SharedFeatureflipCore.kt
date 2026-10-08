@@ -42,6 +42,8 @@ internal class SharedFeatureflipCore private constructor(
     private val isTestClient: Boolean,
     initialFlags: Map<String, FlagValue>,
     private val anonymousKeyStore: AnonymousKeyStore,
+    // Test seam: where the read recorder sends its events. Null means the event processor.
+    enqueueRead: ((SdkEvent) -> Unit)? = null,
 ) {
     private val snapshotLock = ReentrantReadWriteLock()
     private var flagSnapshot: MutableMap<String, FlagValue> = initialFlags.toMutableMap()
@@ -51,10 +53,21 @@ internal class SharedFeatureflipCore private constructor(
     // context up front so evaluate, SSE, polling, and track() all carry it.
     private var currentContext: Map<String, Any?> =
         if (isTestClient) config.context else resolveAnonymousContext(config.context, anonymousKeyStore)
+
+    // The user reads and track() events are attributed to, cached so that a flag read
+    // neither takes [lock] nor stringifies a context value. It is rewritten wherever
+    // currentContext is (here and in identify), inside the same write lock. Volatile, so
+    // readers need no lock.
+    @Volatile
+    private var currentUserId: String? = userIdOf(currentContext)
+
     private var _initialized = false
     private var streamingDataSource: StreamingDataSource? = null
     private var pollingDataSource: PollingDataSource? = null
     internal var lifecycleObserver: LifecycleObserver? = null
+
+    /** Set by [handleBackground], consumed by [handleForeground]. */
+    private val pausedInBackground = AtomicBoolean(false)
 
     private val backgroundScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -63,6 +76,21 @@ internal class SharedFeatureflipCore private constructor(
         flushIntervalMs = config.flushIntervalMs,
         batchSize = config.flushBatchSize,
     )
+
+    // One per core, so every handle on a client key shares one dedupe window. Null for
+    // a test client, which never sends anything (like track()), and when the caller
+    // turned reporting off. create() builds the HttpClient from the same
+    // config.sendEvaluationEvents, so the header and the reporting cannot disagree.
+    // The window is ReadRecorder's fixed hour, not config.flushIntervalMs.
+    private val readRecorder: ReadRecorder? =
+        if (isTestClient || !config.sendEvaluationEvents) {
+            null
+        } else {
+            ReadRecorder(
+                enqueue = enqueueRead ?: eventProcessor::enqueue,
+                timestamp = { isoFormat().format(Date()) },
+            )
+        }
 
     private val refCount = AtomicInteger(1)
     private val isShutDown = AtomicBoolean(false)
@@ -291,6 +319,7 @@ internal class SharedFeatureflipCore private constructor(
         val flag = getFlag(key)
         val value = flag?.value as? Boolean ?: defaultValue
         notifyInspectors(key, flag, value)
+        recordRead(key, flag)
         return value
     }
 
@@ -298,6 +327,7 @@ internal class SharedFeatureflipCore private constructor(
         val flag = getFlag(key)
         val value = flag?.value as? String ?: defaultValue
         notifyInspectors(key, flag, value)
+        recordRead(key, flag)
         return value
     }
 
@@ -305,6 +335,7 @@ internal class SharedFeatureflipCore private constructor(
         val flag = getFlag(key)
         val value = (flag?.value as? Number)?.toDouble() ?: defaultValue
         notifyInspectors(key, flag, value)
+        recordRead(key, flag)
         return value
     }
 
@@ -312,6 +343,7 @@ internal class SharedFeatureflipCore private constructor(
         val flag = getFlag(key)
         val value = if (flag == null) defaultValue else flag.value
         notifyInspectors(key, flag, value)
+        recordRead(key, flag)
         return value
     }
 
@@ -356,9 +388,44 @@ internal class SharedFeatureflipCore private constructor(
         }
     }
 
+    /**
+     * The cached [FlagValue] for [key], or null. Counts as a read, like the typed
+     * accessors, but notifies no inspectors: they fire once per typed decision, and
+     * this is not one.
+     */
+    fun flagDetail(key: String): FlagValue? {
+        val flag = getFlag(key)
+        recordRead(key, flag)
+        return flag
+    }
+
+    /**
+     * Reports a read of [key] (#3545). Called beside [notifyInspectors] in every typed
+     * accessor, and from [flagDetail]. Never from [allFlags]: it hands back every flag
+     * at once, so counting it would mark every served flag as read, which is the bug
+     * read reporting exists to fix. [flag] is null when the key is absent from the
+     * snapshot, and that read is still reported, with no variation.
+     *
+     * Hot path: two field reads, then the recorder's lock-free lookups. No lock, no
+     * allocation and no context access on a repeat read.
+     */
+    private fun recordRead(key: String, flag: FlagValue?) {
+        val recorder = readRecorder ?: return
+        if (isShutDown.get()) return
+        // Isolated like an inspector: reporting a read must never break the read itself.
+        try {
+            recorder.record(key, flag?.variation, currentUserId)
+        } catch (e: Exception) {
+            System.err.println("[featureflip] read recording threw: $e")
+        }
+    }
+
     fun identify(context: Map<String, Any?>) {
         if (isTestClient) {
-            lock.write { currentContext = context }
+            lock.write {
+                currentContext = context
+                currentUserId = userIdOf(context)
+            }
             return
         }
         val resolved = resolveAnonymousContext(context, anonymousKeyStore)
@@ -369,6 +436,7 @@ internal class SharedFeatureflipCore private constructor(
 
         val (stream, poller) = lock.write {
             currentContext = resolved
+            currentUserId = userIdOf(resolved)
             streamingDataSource to pollingDataSource
         }
         stream?.updateContext(resolved)
@@ -377,10 +445,7 @@ internal class SharedFeatureflipCore private constructor(
 
     fun track(eventName: String, metadata: Map<String, Any?>?) {
         if (isTestClient) return
-        // Context values are Any? since #2293; SdkEvent.userId is String?. `?.toString()`
-        // keeps an absent id null rather than the literal "null", and carries a numeric
-        // id through as its decimal form.
-        val userId = lock.read { currentContext["user_id"]?.toString() }
+        val userId = currentUserId
         val event = SdkEvent(
             type = SdkEventType.Custom,
             flagKey = eventName,
@@ -412,6 +477,7 @@ internal class SharedFeatureflipCore private constructor(
 
     // -- Internal test helpers --
 
+    // Never reports a read; see recordRead.
     internal fun allFlags(): Map<String, FlagValue> = snapshotLock.read { flagSnapshot.toMap() }
 
     internal fun debugBufferedEventCount(): Int = eventProcessor.bufferedEventCount()
@@ -556,6 +622,15 @@ internal class SharedFeatureflipCore private constructor(
     }
 
     private fun handleForeground() {
+        // The spec requires a new read window on every return to the foreground. The
+        // window runs on the wall clock, which advances through deep sleep, so a long
+        // sleep already ends it; this reset is a second defence that does not depend on
+        // the clock, so the first read after coming back is always reported again.
+        readRecorder?.resetWindow()
+        // Only resume what handleBackground() paused. Android delivers onStart the
+        // moment the observer registers when the app is already in the foreground, and
+        // restarting the stream there would reconnect a stream that just connected.
+        if (!pausedInBackground.getAndSet(false)) return
         backgroundScope.launch {
             lock.read { streamingDataSource }?.start()
             // Re-read under the lock rather than reusing a value captured alongside
@@ -566,6 +641,7 @@ internal class SharedFeatureflipCore private constructor(
     }
 
     private fun handleBackground() {
+        pausedInBackground.set(true)
         val (stream, poller) = lock.read { streamingDataSource to pollingDataSource }
         stream?.stop()
         poller?.stop()
@@ -578,12 +654,14 @@ internal class SharedFeatureflipCore private constructor(
             config: FeatureflipConfig,
             callFactory: Call.Factory? = null,
             anonymousKeyStore: AnonymousKeyStore? = null,
+            enqueueRead: ((SdkEvent) -> Unit)? = null,
         ): SharedFeatureflipCore {
-            val httpClient = if (callFactory != null) {
-                HttpClient(config.baseUrl, config.clientKey, callFactory)
-            } else {
-                HttpClient(config.baseUrl, config.clientKey)
-            }
+            val httpClient = HttpClient(
+                config.baseUrl,
+                config.clientKey,
+                callFactory,
+                reportsEvaluations = config.sendEvaluationEvents,
+            )
             val cache = FlagCache(config.clientKey)
             val store = anonymousKeyStore
                 ?: config.applicationContext?.let { SharedPreferencesAnonymousKeyStore.fromContext(it) }
@@ -595,6 +673,7 @@ internal class SharedFeatureflipCore private constructor(
                 isTestClient = false,
                 initialFlags = emptyMap(),
                 anonymousKeyStore = store,
+                enqueueRead = enqueueRead,
             )
         }
 
@@ -634,6 +713,13 @@ internal class SharedFeatureflipCore private constructor(
 }
 
 /**
+ * The `user_id` evaluate sends for [context]. Context values are Any? since #2293, and
+ * SdkEvent.userId is String?. `?.toString()` keeps an absent id null rather than the
+ * literal "null", and carries a numeric id through as its decimal form.
+ */
+private fun userIdOf(context: Map<String, Any?>): String? = context["user_id"]?.toString()
+
+/**
  * Structural comparison of configs for the "options differ on repeat get()"
  * warning. `clientKey` is excluded (it is the cache key itself); `context` is
  * excluded because different callers naturally supply different contexts and
@@ -645,5 +731,6 @@ internal fun configsEqual(a: FeatureflipConfig, b: FeatureflipConfig): Boolean {
         a.pollIntervalMs == b.pollIntervalMs &&
         a.flushIntervalMs == b.flushIntervalMs &&
         a.flushBatchSize == b.flushBatchSize &&
-        a.initTimeoutMs == b.initTimeoutMs
+        a.initTimeoutMs == b.initTimeoutMs &&
+        a.sendEvaluationEvents == b.sendEvaluationEvents
 }
