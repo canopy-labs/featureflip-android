@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.4.0 — 2026-10-20
+
+### Added
+
+- Every request now sends `User-Agent: featureflip-android/<version>`, on evaluate, identify, event posts and the SSE stream alike. The SDK previously sent OkHttp's default `okhttp/<x>`, which the Java SDK sends too, so Android usage could not be told apart from Java or from anything else built on OkHttp. The version is generated at build time from the version the release tag sets, so it cannot go stale between releases. (#4141)
+- `FeatureflipConfig.wrapperName` and `wrapperVersion`, for libraries that wrap this SDK (a React Native or Kotlin Multiplatform bridge). The wrapper's token follows the SDK's in the User-Agent, e.g. `featureflip-android/<version> my-wrapper/1.0.0`. An invalid token is ignored with a warning rather than failing construction. (#4141)
+
 ## 3.3.0 — 2026-10-07
 
 ### Added

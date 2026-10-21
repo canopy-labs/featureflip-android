@@ -37,6 +37,9 @@ internal class StreamingDataSource(
     private val onStreamRecovered: (() -> Unit)? = null,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
     private val initialBackoffMs: Long = INITIAL_BACKOFF_MS,
+    // Sent on the stream connect (#4141). The stream uses its own OkHttpClient, so it
+    // shares nothing with HttpClient; the core passes the same value to both.
+    private val userAgent: String = SdkIdentity.DEFAULT,
 ) {
     internal data class SSEEvent(val eventType: String, val data: String)
 
@@ -205,6 +208,7 @@ internal class StreamingDataSource(
         val request = Request.Builder()
             .url(url)
             .header("Accept", "text/event-stream")
+            .header("User-Agent", userAgent)
             .build()
 
         val client = lock.withLock { sseClient } ?: return

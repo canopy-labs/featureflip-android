@@ -526,6 +526,7 @@ internal class SharedFeatureflipCore private constructor(
                 // Stream exhausted its retries -> poll ALONGSIDE it until it recovers.
                 onFallbackToPolling = { handleStreamingFallback() },
                 onStreamRecovered = { stopFallbackPolling() },
+                userAgent = httpClient.userAgent,
             )
             source.start()
             lock.write { streamingDataSource = source }
@@ -661,6 +662,7 @@ internal class SharedFeatureflipCore private constructor(
                 config.clientKey,
                 callFactory,
                 reportsEvaluations = config.sendEvaluationEvents,
+                userAgent = SdkIdentity.userAgent(config.wrapperName, config.wrapperVersion),
             )
             val cache = FlagCache(config.clientKey)
             val store = anonymousKeyStore
@@ -733,4 +735,6 @@ internal fun configsEqual(a: FeatureflipConfig, b: FeatureflipConfig): Boolean {
         a.flushBatchSize == b.flushBatchSize &&
         a.initTimeoutMs == b.initTimeoutMs &&
         a.sendEvaluationEvents == b.sendEvaluationEvents
+    // wrapperName/wrapperVersion are deliberately excluded: they identify the caller
+    // rather than change behavior (see FeatureflipConfig.wrapperName).
 }

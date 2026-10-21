@@ -42,4 +42,17 @@ data class FeatureflipConfig(
      * different value logs a warning and keeps the first value, like every other option.
      */
     val sendEvaluationEvents: Boolean = true,
+    /**
+     * Name of a library that wraps this SDK (a React Native or Kotlin Multiplatform
+     * bridge, an internal platform client). Sent after the SDK's own token in the
+     * User-Agent (`featureflip-android/<version> my-wrapper/1.0.0`) so usage through the
+     * wrapper can be counted. Must be a valid HTTP product token; an invalid one is
+     * ignored with a warning. Leave unset when calling the SDK directly.
+     *
+     * Excluded from `configsEqual`: it identifies the caller rather than changing
+     * behavior, so a wrapper sharing a client key with the host app does not warn.
+     */
+    val wrapperName: String? = null,
+    /** Version of the wrapper named by [wrapperName]. Optional. */
+    val wrapperVersion: String? = null,
 )

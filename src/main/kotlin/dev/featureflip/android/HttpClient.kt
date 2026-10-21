@@ -26,6 +26,12 @@ internal class HttpClient(
      * would let the archive guard pass a flag that live code still reads.
      */
     reportsEvaluations: Boolean = false,
+    /**
+     * Sent on every request (#4141). Defaults to the bare SDK token; the core passes the
+     * one built from the configured wrapper. Set per request rather than through a client
+     * interceptor so a caller-supplied [callFactory] cannot drop it.
+     */
+    internal val userAgent: String = SdkIdentity.DEFAULT,
 ) {
     internal companion object {
         const val REPORTS_EVALUATIONS_HEADER = "X-Featureflip-Reports-Evaluations"
@@ -72,6 +78,7 @@ internal class HttpClient(
             .url("$baseUrl/v1/client/events")
             .header("Content-Type", "application/json")
             .header("Authorization", clientKey)
+            .header("User-Agent", userAgent)
             .post(requestBody)
             .build()
 
@@ -95,6 +102,7 @@ internal class HttpClient(
             .url("$baseUrl$path")
             .header("Content-Type", "application/json")
             .header("Authorization", clientKey)
+            .header("User-Agent", userAgent)
             .post(requestBody)
 
         extraHeaders?.forEach { (key, value) -> requestBuilder.header(key, value) }
