@@ -103,6 +103,48 @@ class ReadReportingTest {
     }
 
     @Test
+    fun `track reports userId when only userId is set`() = runBlocking<Unit> {
+        val client = FeatureflipClient.get(config(context = mapOf("userId" to "u1")))
+
+        client.track("checkout")
+        val event = flushUntilPosted(client)
+
+        assertThat(event["type"]).isEqualTo("Custom")
+        assertThat(event["userId"]).isEqualTo("u1")
+    }
+
+    @Test
+    fun `track prefers user_id over userId`() = runBlocking<Unit> {
+        val client = FeatureflipClient.get(config(context = mapOf("user_id" to "a", "userId" to "b")))
+
+        client.track("checkout")
+        val event = flushUntilPosted(client)
+
+        assertThat(event["type"]).isEqualTo("Custom")
+        assertThat(event["userId"]).isEqualTo("a")
+    }
+
+    @Test
+    fun `track falls back to userId when user_id is null`() = runBlocking<Unit> {
+        val client = FeatureflipClient.get(config(context = mapOf("user_id" to null, "userId" to "u1")))
+
+        client.track("checkout")
+        val event = flushUntilPosted(client)
+
+        assertThat(event["userId"]).isEqualTo("u1")
+    }
+
+    @Test
+    fun `track treats an empty user_id as a value`() = runBlocking<Unit> {
+        val client = FeatureflipClient.get(config(context = mapOf("user_id" to "", "userId" to "b")))
+
+        client.track("checkout")
+        val event = flushUntilPosted(client)
+
+        assertThat(event["userId"]).isEqualTo("")
+    }
+
+    @Test
     fun `each typed accessor and flagDetail report a read with the served variation`() = runBlocking<Unit> {
         val client = FeatureflipClient.get(config())
         client.mergeSnapshot(

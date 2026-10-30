@@ -715,11 +715,12 @@ internal class SharedFeatureflipCore private constructor(
 }
 
 /**
- * The `user_id` evaluate sends for [context]. Context values are Any? since #2293, and
+ * The user id events and evaluate carry for [context]: `user_id` if present and non-null,
+ * else the `userId` alias. Context values are Any? since #2293, and
  * SdkEvent.userId is String?. `?.toString()` keeps an absent id null rather than the
  * literal "null", and carries a numeric id through as its decimal form.
  */
-private fun userIdOf(context: Map<String, Any?>): String? = context["user_id"]?.toString()
+private fun userIdOf(context: Map<String, Any?>): String? = (context["user_id"] ?: context["userId"])?.toString()
 
 /**
  * Structural comparison of configs for the "options differ on repeat get()"
