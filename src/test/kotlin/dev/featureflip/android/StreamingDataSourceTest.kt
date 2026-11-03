@@ -184,6 +184,141 @@ class StreamingDataSourceTest {
     }
 
     @Test
+    fun `a connect still in flight when stop() returns opens no stream (#4947)`() {
+        // stop() cancels the job and the call it knows about, but a connect that had
+        // not yet registered its call went on to open a socket nothing would close.
+        HeldOpenStreamServer(fullSnapshotJson("flag-a")).use { server ->
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val ds = StreamingDataSource(
+                baseUrl = server.baseUrl,
+                clientKey = "key",
+                context = mapOf("user_id" to "u1"),
+                onChange = { _, _ -> },
+                onSnapshot = { _, _ -> },
+            )
+            ds.beforeConnectForTest = {
+                entered.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+            ds.start()
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
+
+            ds.stop()
+            release.countDown()
+
+            assertThat(server.awaitUntil(timeoutMs = 1_000) { server.streams.isNotEmpty() })
+                .`as`("a stopped source must not open the connect it had in flight")
+                .isFalse()
+        }
+    }
+
+    @Test
+    fun `a stop() between start()'s epoch bump and its launch leaves no loop running (#4947)`() {
+        // The core calls start() and stop() under a shared read lock, so they can
+        // interleave. The loop start() then launches belongs to a stopped run: it must
+        // exit, not retry forever and eventually start a fallback poller.
+        HeldOpenStreamServer(fullSnapshotJson("flag-a")).use { server ->
+            val fallbacks = java.util.concurrent.atomic.AtomicInteger()
+            lateinit var ds: StreamingDataSource
+            ds = StreamingDataSource(
+                baseUrl = server.baseUrl,
+                clientKey = "key",
+                context = mapOf("user_id" to "u1"),
+                onChange = { _, _ -> },
+                onSnapshot = { _, _ -> },
+                onFallbackToPolling = { fallbacks.incrementAndGet() },
+                initialBackoffMs = 1,
+            )
+            ds.beforeLaunchForTest = {
+                ds.beforeLaunchForTest = null
+                ds.stop()
+            }
+            ds.start()
+
+            assertThat(server.awaitUntil { !ds.isRunning })
+                .`as`("the stale run's loop must exit")
+                .isTrue()
+            Thread.sleep(200)
+            assertThat(fallbacks.get()).`as`("a stopped run must not arm the polling fallback").isZero()
+            assertThat(server.streams).isEmpty()
+        }
+    }
+
+    private fun connectionReady(id: String) =
+        StreamingDataSource.SSEEvent("connection-ready", """{"connectionId":"$id"}""")
+
+    @Test
+    fun `a connection-ready from a connection identify() replaced does not overwrite the connection id`() {
+        HeldOpenStreamServer(fullSnapshotJson("flag-a")).use { server ->
+            val ds = StreamingDataSource(
+                baseUrl = server.baseUrl,
+                clientKey = "key",
+                context = mapOf("user_id" to "u1"),
+                onChange = { _, _ -> },
+                onSnapshot = { _, _ -> },
+                generation = 4L,
+            )
+            ds.start()
+            val previousUser = ds.connectionEpoch
+            ds.updateContext(mapOf("user_id" to "u2"), 5L)
+            ds.handleEvent(connectionReady("current"), 5L, ds.connectionEpoch)
+
+            ds.handleEvent(connectionReady("old"), 4L, previousUser)
+
+            assertThat(ds.connectionId).isEqualTo("current")
+            ds.stop()
+        }
+    }
+
+    @Test
+    fun `a connection-ready from a connection a restart replaced does not overwrite the connection id (#4946)`() {
+        // A foreground restart replaces the connection without changing the context
+        // generation, so a generation check alone let the replaced one's late event in.
+        HeldOpenStreamServer(fullSnapshotJson("flag-a")).use { server ->
+            val ds = StreamingDataSource(
+                baseUrl = server.baseUrl,
+                clientKey = "key",
+                context = mapOf("user_id" to "u1"),
+                onChange = { _, _ -> },
+                onSnapshot = { _, _ -> },
+                generation = 4L,
+            )
+            ds.start()
+            val replaced = ds.connectionEpoch
+            ds.start()
+            ds.handleEvent(connectionReady("current"), 4L, ds.connectionEpoch)
+
+            ds.handleEvent(connectionReady("old"), 4L, replaced)
+
+            assertThat(ds.connectionId).isEqualTo("current")
+            ds.stop()
+        }
+    }
+
+    @Test
+    fun `a connection-ready arriving after stop() does not restore the connection id (#4946)`() {
+        HeldOpenStreamServer(fullSnapshotJson("flag-a")).use { server ->
+            val ds = StreamingDataSource(
+                baseUrl = server.baseUrl,
+                clientKey = "key",
+                context = mapOf("user_id" to "u1"),
+                onChange = { _, _ -> },
+                onSnapshot = { _, _ -> },
+            )
+            ds.start()
+            val live = ds.connectionEpoch
+            ds.handleEvent(connectionReady("c1"), 0L, live)
+            assertThat(ds.connectionId).isEqualTo("c1")
+
+            ds.stop()
+            ds.handleEvent(connectionReady("late"), 0L, live)
+
+            assertThat(ds.connectionId).isNull()
+        }
+    }
+
+    @Test
     fun `updateContext reconnects for a newer generation, not for an equal or older one`() {
         // A source is built with the context and generation current when it starts, so an
         // equal generation means it already carries that context (#4937).

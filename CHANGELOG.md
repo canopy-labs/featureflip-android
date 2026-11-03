@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.5.4 — 2026-11-03
+
+### Fixed
+
+- Stopping the stream no longer lets a connection that was still being opened go through. When `stop()` ran just as a connect was starting, for example on a quick switch to the background, during `close()` or when `identify()` reconnected, that connect could still open its stream after `stop()` returned and hold the connection open on the server until it timed out. It now checks that the stream is still running right before it connects, and gives up if it is not. A `stop()` that landed while `start()` was launching its connect loop also no longer leaves that loop retrying in the background, where it could eventually start polling beside a stopped stream. Flag values were never affected. (#4947)
+- The connection ID sent with `identify()` can no longer belong to a connection that has been replaced. A late `connection-ready` from the previous connection could overwrite the current ID after a foreground restart, or put back the ID that `stop()` had just cleared, so `identify()` pointed the server at a closed connection. (#4946)
+
 ## 3.5.3 — 2026-11-03
 
 ### Fixed

@@ -71,6 +71,11 @@ class ForegroundRestartTest {
                 assertThat(source.isRunning)
                     .`as`("the foreground restart must not revive a source close() detached")
                     .isFalse()
+                // Nor leave a socket behind: a connect the restart began before close()
+                // stopped the source must not open afterwards (#4947).
+                assertThat(server.awaitUntil { server.openStreams() == 0 })
+                    .`as`("a released core must leave no stream connection open")
+                    .isTrue()
             } finally {
                 gate.countDown()
                 if (!closerStarted) core.release()

@@ -99,17 +99,6 @@ class ErrorBoundaryLoggingTest {
     }
 
     @Test
-    fun `a connection-ready from a replaced connection does not overwrite the connection id`() {
-        val ds = stream()
-        ds.handleEvent(StreamingDataSource.SSEEvent("connection-ready", """{"connectionId":"current"}"""), 5L)
-
-        // A late one on the previous user's connection (generation 4).
-        ds.handleEvent(StreamingDataSource.SSEEvent("connection-ready", """{"connectionId":"old"}"""), 4L)
-
-        assertThat(ds.connectionId).isEqualTo("current")
-    }
-
-    @Test
     fun `a rejected stream connect logs the status once per outage`() {
         MockWebServer().use { server ->
             server.start()

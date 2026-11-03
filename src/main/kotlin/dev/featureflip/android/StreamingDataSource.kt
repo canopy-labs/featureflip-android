@@ -109,6 +109,14 @@ internal class StreamingDataSource(
     private var backoffMs = initialBackoffMs
     private var retryCount = 0
 
+    // Bumped under [lock] by every start() and stop(), and captured by the connect loop
+    // that start() launches. A connection whose epoch is no longer current belongs to a
+    // run that was stopped or replaced, which the context generation cannot tell: a
+    // foreground restart replaces the connection without changing it (#4946). Within one
+    // run, connections are sequential on the loop's coroutine, so a backoff reconnect
+    // needs no bump: the previous connection has finished reading before it opens.
+    private var epoch = 0L
+
     // True between arming the polling fallback and the next delivered frame. Gates
     // both callbacks so each fires once per outage rather than once per retry.
     //
@@ -118,12 +126,23 @@ internal class StreamingDataSource(
     // running beside a recovered stream forever, which is the defect this fixes.
     private var fallbackActive = false
 
+    // Written under [lock], together with the epoch check, so stop() cannot null it
+    // between a late connection-ready's check and its assignment (#4946).
     @Volatile
     var connectionId: String? = null
         private set
 
+    /** The epoch of the current run; see [epoch]. */
+    internal val connectionEpoch: Long get() = lock.withLock { epoch }
+
     internal var sseClient: OkHttpClient? = null
         private set
+
+    /** Test seam: runs at the top of every connect attempt, before it opens anything. */
+    internal var beforeConnectForTest: (() -> Unit)? = null
+
+    /** Test seam: runs in start() after the epoch is bumped, before the loop launches. */
+    internal var beforeLaunchForTest: (() -> Unit)? = null
 
     /** Whether the connect loop is live: started and not since stopped. */
     internal val isRunning: Boolean get() = job?.isActive == true
@@ -135,7 +154,7 @@ internal class StreamingDataSource(
 
     fun start() {
         job?.cancel()
-        lock.withLock {
+        val runEpoch = lock.withLock {
             // Cancelling the job does not end a connection that is already reading: the
             // SSE read blocks in I/O, which coroutine cancellation cannot interrupt. Left
             // open, the old connection outlives its replacement and stop(), which only
@@ -147,19 +166,24 @@ internal class StreamingDataSource(
             sseClient?.dispatcher?.executorService?.shutdown()
             sseClient?.connectionPool?.evictAll()
             sseClient = createClient()
+            // The ID named the connection just cancelled; the new one sends its own.
+            connectionId = null
+            ++epoch
         }
-        job = scope.launch { connectLoop() }
+        beforeLaunchForTest?.invoke()
+        job = scope.launch { connectLoop(runEpoch) }
     }
 
     fun stop() {
         job?.cancel()
         job = null
         lock.withLock {
+            epoch++
             activeCall?.cancel()
             sseClient?.dispatcher?.executorService?.shutdown()
             sseClient?.connectionPool?.evictAll()
+            connectionId = null
         }
-        connectionId = null
     }
 
     /**
@@ -180,15 +204,20 @@ internal class StreamingDataSource(
         start()
     }
 
-    private suspend fun connectLoop() {
-        while (currentCoroutineContext().isActive) {
+    private suspend fun connectLoop(runEpoch: Long) {
+        // The epoch as well as the job: start() launches the loop after leaving the lock,
+        // and the core can run stop() or another start() in between, so the job this
+        // loop runs in may be one nothing will cancel. Without the exit it would retry
+        // forever, opening nothing, and arm the polling fallback beside a stopped stream.
+        fun stale() = lock.withLock { epoch != runEpoch }
+        while (currentCoroutineContext().isActive && !stale()) {
             try {
-                connect()
+                connect(runEpoch)
             } catch (e: Exception) {
-                if (!currentCoroutineContext().isActive) return
+                if (!currentCoroutineContext().isActive || stale()) return
                 logStreamFailure(e.javaClass.name, "stream connection failed, will retry: $e")
             }
-            if (!currentCoroutineContext().isActive) return
+            if (!currentCoroutineContext().isActive || stale()) return
 
             // Read the ladder AFTER connect(), not before: a healthy connection can
             // last hours and resets the ladder from inside, so a value captured up
@@ -238,7 +267,8 @@ internal class StreamingDataSource(
         System.err.println("[featureflip] $message")
     }
 
-    private fun connect() {
+    private fun connect(runEpoch: Long) {
+        beforeConnectForTest?.invoke()
         // Read together: every frame this connection delivers is tagged with the
         // generation its context belongs to.
         val (currentContext, connectedFor) = lock.withLock { context.toMap() to generation }
@@ -250,9 +280,16 @@ internal class StreamingDataSource(
             .header("User-Agent", userAgent)
             .build()
 
-        val client = lock.withLock { sseClient } ?: return
-        val call = client.newCall(request)
-        lock.withLock { activeCall = call }
+        // Checked and registered in one critical section (#4947). Cancelling the job
+        // does not stop a connect already past its isActive checks, so a stop() or
+        // restart that ran since this run began is caught here. One that runs after
+        // the call is registered cancels it, and execute() then throws instead of
+        // opening the socket.
+        val call = lock.withLock {
+            if (epoch != runEpoch) return
+            val client = sseClient ?: return
+            client.newCall(request).also { activeCall = it }
+        }
         call.execute().use { response ->
             if (response.code != 200) {
                 logStreamFailure("HTTP ${response.code}", "stream rejected: HTTP ${response.code}, will retry")
@@ -260,17 +297,17 @@ internal class StreamingDataSource(
             }
 
             val reader = response.body.source().inputStream().bufferedReader()
-            readSseStream(reader, connectedFor)
+            readSseStream(reader, connectedFor, runEpoch)
         }
     }
 
-    private fun readSseStream(reader: BufferedReader, connectedFor: Long) {
+    private fun readSseStream(reader: BufferedReader, connectedFor: Long, runEpoch: Long) {
         val lineBuffer = mutableListOf<String>()
         while (true) {
             val line = reader.readLine() ?: break
             if (line.isEmpty()) {
                 parseSSEEvent(lineBuffer)?.let {
-                    handleEvent(it, connectedFor)
+                    handleEvent(it, connectedFor, runEpoch)
                     // AFTER the store has been updated, never before: retiring the
                     // fallback poller is what this signals, and a poller retired one
                     // frame early can still land an older whole-store replace on top
@@ -317,14 +354,21 @@ internal class StreamingDataSource(
         if (recovered) onStreamRecovered?.invoke()
     }
 
-    internal fun handleEvent(event: SSEEvent, connectedFor: Long = lock.withLock { generation }) {
+    internal fun handleEvent(
+        event: SSEEvent,
+        connectedFor: Long = lock.withLock { generation },
+        runEpoch: Long = connectionEpoch,
+    ) {
         if (event.eventType == "connection-ready") {
             try {
-                // A late connection-ready on a connection identify() has since replaced
-                // must not overwrite the ID of the current one.
-                if (connectedFor != lock.withLock { generation }) return
                 val data: Map<String, String> = json.readValue(event.data)
-                connectionId = data["connectionId"]
+                // A late connection-ready on a connection that a stop(), a restart or
+                // identify()'s reconnect has since replaced must not overwrite the ID of
+                // the current one, or put back the one stop() cleared. identify() always
+                // reconnects through stop() and start(), so the epoch covers it too.
+                lock.withLock {
+                    if (runEpoch == epoch) connectionId = data["connectionId"]
+                }
             } catch (e: Exception) {
                 System.err.println("[featureflip] ignoring unparseable connection-ready event: $e")
             }
