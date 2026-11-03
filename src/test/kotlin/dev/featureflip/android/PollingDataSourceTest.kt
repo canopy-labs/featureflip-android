@@ -40,7 +40,7 @@ class PollingDataSourceTest {
             httpClient = httpClient,
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
-            onChange = { received.add(it) },
+            onChange = { flags, _ -> received.add(flags) },
         )
 
         poller.pollOnce()
@@ -60,7 +60,7 @@ class PollingDataSourceTest {
             httpClient = httpClient,
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
-            onChange = { received.add(it) },
+            onChange = { flags, _ -> received.add(flags) },
         )
 
         poller.pollOnce() // Should not throw
@@ -80,10 +80,10 @@ class PollingDataSourceTest {
             httpClient = httpClient,
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
-            onChange = { received.add(it) },
+            onChange = { flags, _ -> received.add(flags) },
         )
 
-        poller.updateContext(mapOf("user_id" to "user-2"))
+        poller.updateContext(mapOf("user_id" to "user-2"), generation = 1)
         poller.pollOnce()
 
         val request = server.takeRequest()
@@ -109,7 +109,7 @@ class PollingDataSourceTest {
             httpClient = httpClient,
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
-            onChange = { received.add(it) },
+            onChange = { flags, _ -> received.add(flags) },
         )
 
         poller.stop()
@@ -121,5 +121,49 @@ class PollingDataSourceTest {
         assertThat(server.requestCount)
             .`as`("the request itself is not recallable — only its delivery is suppressed")
             .isEqualTo(1)
+    }
+
+    @Test
+    fun `a poll's delivery carries the generation it was requested for`() {
+        // The core drops a response requested for a user identify() has since replaced
+        // (#4886), so the tag must be the generation read WITH the context the request
+        // carried, not whatever is current when the response lands.
+        server.enqueue(MockResponse.Builder().body(makeResponseBody(emptyMap())).build())
+        val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
+        val tags = CopyOnWriteArrayList<Long>()
+        val poller = PollingDataSource(
+            httpClient = httpClient,
+            context = mapOf("user_id" to "user-1"),
+            intervalMs = 60_000,
+            onChange = { _, generation -> tags.add(generation) },
+            generation = 3,
+        )
+
+        poller.pollOnce()
+
+        assertThat(tags).containsExactly(3L)
+    }
+
+    @Test
+    fun `an updateContext older than the current generation is ignored`() {
+        // Two identify() calls retarget the sources under a shared lock, so their
+        // updates can arrive out of order. The older one must not win, or every later
+        // poll asks for a user the core has moved past and is dropped as stale.
+        server.enqueue(MockResponse.Builder().body(makeResponseBody(emptyMap())).build())
+        val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
+        val tags = CopyOnWriteArrayList<Long>()
+        val poller = PollingDataSource(
+            httpClient = httpClient,
+            context = mapOf("user_id" to "user-1"),
+            intervalMs = 60_000,
+            onChange = { _, generation -> tags.add(generation) },
+        )
+
+        poller.updateContext(mapOf("user_id" to "user-3"), generation = 2)
+        poller.updateContext(mapOf("user_id" to "user-2"), generation = 1)
+        poller.pollOnce()
+
+        assertThat(server.takeRequest().body!!.utf8()).contains("user-3")
+        assertThat(tags).containsExactly(2L)
     }
 }

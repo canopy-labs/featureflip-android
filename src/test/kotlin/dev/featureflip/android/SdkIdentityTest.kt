@@ -85,8 +85,8 @@ class SdkIdentityTest {
             baseUrl = baseUrl(),
             clientKey = "client-key",
             context = emptyMap(),
-            onChange = {},
-            onSnapshot = {},
+            onChange = { _, _ -> },
+            onSnapshot = { _, _ -> },
             userAgent = "$sdkToken my-wrapper/1.0",
         )
 

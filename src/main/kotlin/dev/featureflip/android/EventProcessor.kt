@@ -84,10 +84,17 @@ internal class EventProcessor(
     private var closed = false
 
     fun start() {
-        flushJob = scope.launch {
-            while (isActive) {
-                delay(flushIntervalMs)
-                flush()
+        // Under the lock, and refused once closed: initialize() can get here after the
+        // last handle's close() has already run markClosed(), and a periodic job
+        // launched then would tick on the released core for the life of the process
+        // (#4901).
+        lock.withLock {
+            if (closed) return
+            flushJob = scope.launch {
+                while (isActive) {
+                    delay(flushIntervalMs)
+                    flush()
+                }
             }
         }
     }
@@ -259,9 +266,11 @@ internal class EventProcessor(
         // Cancelled here, not in stop(), so the periodic job cannot tick in the
         // window after the caller returned: such a tick flushes with closed
         // already true, and a transient failure there discards the batch.
-        flushJob?.cancel()
-        flushJob = null
-        lock.withLock { closed = true }
+        val job = lock.withLock {
+            closed = true
+            flushJob.also { flushJob = null }
+        }
+        job?.cancel()
     }
 
     fun stop() {

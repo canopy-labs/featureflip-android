@@ -304,11 +304,6 @@ class FeatureflipClientTest {
     @Test
     fun `startDataSource uses currentContext after identify`() {
         val flags = mapOf("feature" to flagValue(true))
-        // For initialize evaluate call
-        server.enqueue(MockResponse.Builder().body(makeEvaluateResponseBody(flags)).build())
-        // For poller initial poll during initialize
-        server.enqueue(MockResponse.Builder().body(makeEvaluateResponseBody(flags)).build())
-
         val config = FeatureflipConfig(
             clientKey = "test-key",
             baseUrl = server.url("/").toString().trimEnd('/'),
@@ -316,13 +311,9 @@ class FeatureflipClientTest {
             streaming = false,
             pollIntervalMs = 60_000,
         )
+        // Not initialized, so no data source is running yet. (This used to close the
+        // client and restart a source on the released core, which #4901 forbids.)
         val client = FeatureflipClient.get(config)
-        client.initialize()
-        client.close()
-
-        // Drain all requests from initialize
-        server.takeRequest(2, TimeUnit.SECONDS)
-        server.takeRequest(2, TimeUnit.SECONDS)
 
         // Identify with new context
         server.enqueue(MockResponse.Builder().body(makeEvaluateResponseBody(flags)).build())

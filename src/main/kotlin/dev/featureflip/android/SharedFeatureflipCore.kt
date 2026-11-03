@@ -16,6 +16,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -46,11 +47,28 @@ internal class SharedFeatureflipCore private constructor(
     // Test seam: where the read recorder sends its events. Null means the event processor.
     enqueueRead: ((SdkEvent) -> Unit)? = null,
 ) {
+    // Lock order: snapshotLock before lock, never the reverse. identify() takes both to
+    // swap the snapshot and the context together.
     private val snapshotLock = ReentrantReadWriteLock()
     private val updateListeners = CopyOnWriteArrayList<FlagUpdateListener>()
     private var flagSnapshot: MutableMap<String, FlagValue> = initialFlags.toMutableMap()
 
     private val lock = ReentrantReadWriteLock()
+
+    // Which user the snapshot belongs to (#4886). Every applied identify() bumps it, and
+    // every poll, stream frame and initial fetch is tagged with the value current when
+    // it was requested. A delivery tagged with an older one was evaluated for the
+    // previous user and is dropped. Written only while holding BOTH snapshotLock and
+    // lock (write), so a reader holding either one sees a value that matches what it
+    // guards: the snapshot under snapshotLock, currentContext under lock.
+    private var contextGeneration = 0L
+
+    // Orders overlapping identify() calls. A response is applied only if no later
+    // identify() has already been applied; otherwise it would swap the earlier user
+    // back in. Guarded by snapshotLock.
+    private val identifySequence = AtomicLong()
+    private var appliedIdentifySequence = 0L
+
     // For real clients, resolve a persisted anonymous user_id into the working
     // context up front so evaluate, SSE, polling, and track() all carry it.
     private var currentContext: Map<String, Any?> =
@@ -96,6 +114,13 @@ internal class SharedFeatureflipCore private constructor(
 
     private val refCount = AtomicInteger(1)
     private val isShutDown = AtomicBoolean(false)
+
+    // Test seam: runs in identify() after the new user's flags are applied and before
+    // the data sources are pointed at that user, the window a close() must not be able
+    // to exploit (#4901).
+    @Volatile
+    internal var afterIdentifyAppliedForTest: (() -> Unit)? = null
+
     private var owningMap: ConcurrentHashMap<String, SharedFeatureflipCore>? = null
     private var owningKey: String? = null
 
@@ -192,20 +217,23 @@ internal class SharedFeatureflipCore private constructor(
         }
 
         try {
+            // Use currentContext (not config.context) so the persisted anonymous user_id
+            // resolved at construction is sent. An identify() that completes while the
+            // fetch is on the wire supersedes it (#4886): its response is the one to
+            // keep, so both loads below apply only if the generation is unchanged.
+            val (initialContext, requestedFor) = lock.read { currentContext to contextGeneration }
+
             // Load persisted cache
             cache.loadFromDisk()
             val cached = cache.all()
             if (cached.isNotEmpty()) {
-                updateSnapshot(cached)
+                loadSnapshotIfCurrent(cached, requestedFor)
             }
 
-            // Fetch initial flags. Use currentContext (not config.context) so the
-            // persisted anonymous user_id resolved at construction is sent.
+            // Fetch initial flags.
             try {
-                val initialContext = lock.read { currentContext }
                 val response = httpClient.evaluate(initialContext, config.initTimeoutMs)
-                cache.setAll(response.flags)
-                updateSnapshot(response.flags)
+                if (loadSnapshotIfCurrent(response.flags, requestedFor)) cache.setAll(response.flags)
             } catch (e: Exception) {
                 // NON-TERMINAL BY DESIGN — do not rethrow, and do not leave
                 // _initialized false. Any flags already loaded from disk above keep
@@ -225,20 +253,33 @@ internal class SharedFeatureflipCore private constructor(
                 )
             }
 
-            // Start data source
+            // The last handle may have been closed while the fetch was on the wire. That
+            // released the core and unregistered it from the factory, so nothing can
+            // ever stop what is started on it from here: the stream would retry forever
+            // (#4901). Logged because the caller sees a client that never streamed.
+            if (isShutDown.get()) {
+                System.err.println(
+                    "[featureflip] client closed during initialize(); not starting the data source",
+                )
+                return
+            }
+
+            // A close() landing from here on is covered by each start below refusing,
+            // atomically, once the core is shut down: startDataSource() and the observer
+            // registration check under the write lock detachSources() needs, and the
+            // event processor checks under its own lock against markClosed(). Either
+            // the start wins and shutdown then stops it, or it sees the shutdown and
+            // starts nothing.
             startDataSource()
-
-            // Start event processor
             eventProcessor.start()
-
-            // Start lifecycle observer
-            val observer = LifecycleObserver(
-                onForeground = { handleForeground() },
-                onBackground = { handleBackground() },
-            )
             lock.write {
-                lifecycleObserver = observer
-                _initialized = true
+                if (!isShutDown.get()) {
+                    lifecycleObserver = LifecycleObserver(
+                        onForeground = { handleForeground() },
+                        onBackground = { handleBackground() },
+                    )
+                    _initialized = true
+                }
             }
         } finally {
             // Release any threads waiting in the "else" branch above, even if
@@ -431,18 +472,43 @@ internal class SharedFeatureflipCore private constructor(
             return
         }
         val resolved = resolveAnonymousContext(context, anonymousKeyStore)
+        val sequence = identifySequence.incrementAndGet()
         val connectionId = lock.read { streamingDataSource }?.connectionId
         val response = httpClient.identify(resolved, connectionId)
-        cache.setAll(response.flags)
-        val changed = replaceSnapshotAndDiff(response.flags)
 
-        val (stream, poller) = lock.write {
-            currentContext = resolved
-            currentUserId = userIdOf(resolved)
-            streamingDataSource to pollingDataSource
+        // The last handle was closed while the request was on the wire. Nobody can
+        // observe this core again (close() dropped every listener, and a closed handle
+        // serves defaults), so there is nothing to apply and nothing to report.
+        if (isShutDown.get()) return
+
+        // Swap the flags and the context together, bumping the generation, so a poll
+        // or stream frame still on the wire for the previous user is recognisably
+        // stale (#4886). Diffed under the same lock as the swap.
+        val (changed, generation) = snapshotLock.write {
+            // Overtaken by a later identify() that has already been applied: its
+            // response is the newer one, and applying this one would swap the earlier
+            // user back in. Silent: the caller's last identify() is being served.
+            if (sequence < appliedIdentifySequence) return
+            appliedIdentifySequence = sequence
+            val before = flagSnapshot
+            flagSnapshot = response.flags.toMutableMap()
+            val generation = lock.write {
+                currentContext = resolved
+                currentUserId = userIdOf(resolved)
+                ++contextGeneration
+            }
+            diffKeys(before, flagSnapshot) to generation
         }
-        stream?.updateContext(resolved)
-        poller?.updateContext(resolved)
+        cache.setAll(response.flags)
+        afterIdentifyAppliedForTest?.invoke()
+
+        // Read and retargeted under the lock detachSources() writes under, so a close()
+        // that has released the core finds nothing here to restart (#4901): restarting
+        // the stream of a released core would leave it reconnecting forever.
+        lock.read {
+            streamingDataSource?.updateContext(resolved, generation)
+            pollingDataSource?.updateContext(resolved, generation)
+        }
         // Last, so a listener sees the new user's context and flags together.
         notifyUpdate(changed)
     }
@@ -492,7 +558,7 @@ internal class SharedFeatureflipCore private constructor(
 
     /** Test-only: replace the snapshot with hand-built [FlagValue]s. */
     internal fun applyFlagUpdateForTest(flags: Map<String, FlagValue>) {
-        updateSnapshot(flags)
+        snapshotLock.write { flagSnapshot = flags.toMutableMap() }
     }
 
     // -- Private --
@@ -505,55 +571,60 @@ internal class SharedFeatureflipCore private constructor(
 
     private fun getFlag(key: String): FlagValue? = snapshotLock.read { flagSnapshot[key] }
 
-    // Silent: the initial load (initialize) is reported by readiness, not as an update.
-    // Every later change goes through replaceSnapshotAndDiff and notifies. forTesting
-    // seeds flagSnapshot directly rather than through here.
-    private fun updateSnapshot(flags: Map<String, FlagValue>) {
-        snapshotLock.write { flagSnapshot = flags.toMutableMap() }
-    }
-
+    /**
+     * Starts the configured data source. Runs entirely under the write lock, which
+     * [detachSources] also takes, and refuses once the core is shut down (#4901): a
+     * source started on a released core has no owner left to stop it. Holding the lock
+     * across the context read and the registration also means an identify() either
+     * finds the new source to retarget or has already set the context it starts with.
+     */
     internal fun startDataSource() {
-        // Idempotent, and that is load-bearing rather than defensive (#3075). An
-        // orphaned streaming source used to stop itself at the retry cap; it now
-        // retries forever AND keeps calling back into this core, so one left running
-        // by a second startDataSource() could retire the live source's fallback poller
-        // mid-outage and leave the app uncovered by either. FeatureflipClient
-        // .startDataSource() exists for tests that restart after close, so "runs once"
-        // cannot rest on a comment.
-        if (lock.read { streamingDataSource } != null) return
-        val ctx = lock.read { currentContext }
-        if (config.streaming) {
+        lock.write {
+            // Idempotent, and that is load-bearing rather than defensive (#3075). An
+            // orphaned streaming source used to stop itself at the retry cap; it now
+            // retries forever AND keeps calling back into this core, so one left running
+            // by a second startDataSource() could retire the live source's fallback
+            // poller mid-outage and leave the app uncovered by either.
+            if (isShutDown.get() || streamingDataSource != null) return
+            if (!config.streaming) {
+                startPollingLocked()
+                return
+            }
             val source = StreamingDataSource(
                 baseUrl = config.baseUrl,
                 clientKey = config.clientKey,
-                context = ctx,
-                onChange = { flags -> handleStreamingUpdate(flags) },
+                context = currentContext,
+                onChange = { flags, requestedFor -> handleStreamingUpdate(flags, requestedFor) },
                 // First flags-updated after (re)connect is the full snapshot -> REPLACE.
-                onSnapshot = { flags -> applyFullSnapshot(flags) },
+                onSnapshot = { flags, requestedFor -> applyFullSnapshot(flags, requestedFor) },
                 // Stream exhausted its retries -> poll ALONGSIDE it until it recovers.
                 onFallbackToPolling = { handleStreamingFallback() },
                 onStreamRecovered = { stopFallbackPolling() },
                 userAgent = httpClient.userAgent,
+                generation = contextGeneration,
             )
             source.start()
-            lock.write { streamingDataSource = source }
-        } else {
-            startPolling()
+            streamingDataSource = source
         }
     }
 
     internal fun startPolling() {
+        lock.write { startPollingLocked() }
+    }
+
+    /** Caller holds the write lock; see [startDataSource] for why. */
+    private fun startPollingLocked() {
         // Idempotent: a stream->polling fallback must start at most one poller.
-        if (lock.read { pollingDataSource } != null) return
-        val ctx = lock.read { currentContext }
+        if (isShutDown.get() || pollingDataSource != null) return
         val source = PollingDataSource(
             httpClient = httpClient,
-            context = ctx,
+            context = currentContext,
             intervalMs = config.pollIntervalMs,
-            onChange = { flags -> applyFullSnapshot(flags) },
+            onChange = { flags, requestedFor -> applyFullSnapshot(flags, requestedFor) },
+            generation = contextGeneration,
         )
         source.start()
-        lock.write { pollingDataSource = source }
+        pollingDataSource = source
     }
 
     /**
@@ -606,22 +677,57 @@ internal class SharedFeatureflipCore private constructor(
      */
     private fun isLiveStreamingSource(): Boolean = lock.read { streamingDataSource } != null
 
-    private fun handleStreamingUpdate(delta: Map<String, FlagValue>) {
-        val merged = mergeSnapshot(delta)
+    private fun handleStreamingUpdate(delta: Map<String, FlagValue>, requestedFor: Long) {
+        val merged = mergeIfCurrent(delta, requestedFor) ?: return
         cache.setAll(merged)
     }
 
-    internal fun applyFullSnapshot(flags: Map<String, FlagValue>) {
-        notifyUpdate(replaceSnapshotAndDiff(flags))
+    /**
+     * Replaces the snapshot with [flags] and notifies the changed keys. [requestedFor]
+     * is the context generation a data source asked for these flags under; null (tests)
+     * applies unconditionally.
+     */
+    internal fun applyFullSnapshot(flags: Map<String, FlagValue>, requestedFor: Long? = null) {
+        val changed = replaceSnapshotAndDiff(flags, requestedFor) ?: return
+        notifyUpdate(changed)
         cache.setAll(flags)
     }
 
-    /** Swaps the snapshot under the write lock and returns the keys that changed. */
-    internal fun replaceSnapshotAndDiff(flags: Map<String, FlagValue>): List<String> =
+    /**
+     * Whether a delivery requested under [requestedFor] is for a user identify() has
+     * since replaced. Caller holds [snapshotLock], under which [contextGeneration] is
+     * stable.
+     *
+     * A stale delivery is dropped SILENTLY, on purpose. It is the expected outcome
+     * whenever identify() overlaps a poll or a stream frame, which is routine on a
+     * user switch, and the new user's flags are already being served; a diagnostic
+     * would fire on healthy apps and tell an operator nothing actionable.
+     */
+    private fun isStale(requestedFor: Long?): Boolean =
+        requestedFor != null && requestedFor != contextGeneration
+
+    /**
+     * Swaps the snapshot under the write lock and returns the keys that changed, or
+     * null when the delivery is stale (see [isStale]) and nothing was swapped.
+     */
+    private fun replaceSnapshotAndDiff(flags: Map<String, FlagValue>, requestedFor: Long?): List<String>? =
         snapshotLock.write {
+            if (isStale(requestedFor)) return null
             val before = flagSnapshot
             flagSnapshot = flags.toMutableMap()
             diffKeys(before, flagSnapshot)
+        }
+
+    /**
+     * initialize()'s load, from disk and from the initial fetch; false when an
+     * identify() has superseded it. Silent: the initial load is reported by readiness,
+     * not as an update.
+     */
+    private fun loadSnapshotIfCurrent(flags: Map<String, FlagValue>, requestedFor: Long): Boolean =
+        snapshotLock.write {
+            if (isStale(requestedFor)) return false
+            flagSnapshot = flags.toMutableMap()
+            true
         }
 
     internal fun addUpdateListener(listener: FlagUpdateListener): () -> Unit {
@@ -642,9 +748,14 @@ internal class SharedFeatureflipCore private constructor(
         }
     }
 
-    internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> {
+    internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> =
+        checkNotNull(mergeIfCurrent(delta, requestedFor = null))
+
+    /** Merges a stream delta and notifies; null when the delta is stale (see [isStale]). */
+    private fun mergeIfCurrent(delta: Map<String, FlagValue>, requestedFor: Long?): Map<String, FlagValue>? {
         val keys: List<String>
         val merged = snapshotLock.write {
+            if (isStale(requestedFor)) return null
             val before = flagSnapshot.toMap()
             for ((key, value) in delta) {
                 if (value.reason == "FLAG_REMOVED" && value.value == null) {
@@ -671,11 +782,14 @@ internal class SharedFeatureflipCore private constructor(
         // restarting the stream there would reconnect a stream that just connected.
         if (!pausedInBackground.getAndSet(false)) return
         backgroundScope.launch {
-            lock.read { streamingDataSource }?.start()
-            // Re-read under the lock rather than reusing a value captured alongside
-            // the stream: stopFallbackPolling() can retire the poller in between, and
-            // starting one nothing holds a reference to leaves it polling forever.
-            lock.read { pollingDataSource }?.start()
+            // Started while holding the lock, not merely read under it: detachSources()
+            // and stopFallbackPolling() null these under the write lock, so a source
+            // close() released (#4901) or a retired fallback poller cannot be restarted
+            // here, which would leave it running with nothing holding a reference.
+            lock.read {
+                streamingDataSource?.start()
+                pollingDataSource?.start()
+            }
         }
     }
 

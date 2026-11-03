@@ -84,8 +84,8 @@ class StreamingDataSourceTest {
             baseUrl = "https://eval.example.com",
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
-            onChange = {},
-            onSnapshot = {},
+            onChange = { _, _ -> },
+            onSnapshot = { _, _ -> },
             scope = kotlinx.coroutines.CoroutineScope(
                 kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob()
             ),
@@ -117,8 +117,8 @@ class StreamingDataSourceTest {
             baseUrl = "https://eval.example.com",
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
-            onChange = { deltas.add(it) },
-            onSnapshot = { snapshots.add(it) },
+            onChange = { flags, _ -> deltas.add(flags) },
+            onSnapshot = { flags, _ -> snapshots.add(flags) },
         )
 
         // The server marks the connect-time snapshot with `full: true`; deltas omit it.
@@ -139,8 +139,8 @@ class StreamingDataSourceTest {
             baseUrl = "https://eval.example.com",
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
-            onChange = { deltas.add(it) },
-            onSnapshot = { snapshots.add(it) },
+            onChange = { flags, _ -> deltas.add(flags) },
+            onSnapshot = { flags, _ -> snapshots.add(flags) },
         )
 
         // A broadcast delta can arrive before the connect snapshot (the connection
@@ -164,8 +164,8 @@ class StreamingDataSourceTest {
                 baseUrl = server.baseUrl,
                 clientKey = "key",
                 context = mapOf("user_id" to "u1"),
-                onChange = {},
-                onSnapshot = {},
+                onChange = { _, _ -> },
+                onSnapshot = { _, _ -> },
             )
             ds.start()
             assertThat(server.awaitUntil { server.streams.size == 1 }).isTrue()
@@ -198,8 +198,8 @@ class StreamingDataSourceTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
-            onChange = {},
-            onSnapshot = {},
+            onChange = { _, _ -> },
+            onSnapshot = { _, _ -> },
             onFallbackToPolling = { armings.incrementAndGet(); latch.countDown() },
             scope = kotlinx.coroutines.CoroutineScope(
                 kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
@@ -260,8 +260,8 @@ class StreamingDataSourceTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
-            onChange = {},
-            onSnapshot = {},
+            onChange = { _, _ -> },
+            onSnapshot = { _, _ -> },
             onFallbackToPolling = { armed.countDown() },
             onStreamRecovered = { recoveries.incrementAndGet(); recovered.countDown() },
             scope = kotlinx.coroutines.CoroutineScope(
@@ -308,8 +308,8 @@ class StreamingDataSourceTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
-            onChange = {},
-            onSnapshot = {},
+            onChange = { _, _ -> },
+            onSnapshot = { _, _ -> },
             onFallbackToPolling = { armed.countDown() },
             scope = kotlinx.coroutines.CoroutineScope(
                 kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob(),
@@ -354,8 +354,8 @@ class StreamingDataSourceTest {
             baseUrl = server.url("/").toString().trimEnd('/'),
             clientKey = "key",
             context = mapOf("user_id" to "u1"),
-            onChange = {},
-            onSnapshot = {},
+            onChange = { _, _ -> },
+            onSnapshot = { _, _ -> },
             onFallbackToPolling = { armed.countDown() },
             onStreamRecovered = { recoveries.incrementAndGet() },
             scope = kotlinx.coroutines.CoroutineScope(

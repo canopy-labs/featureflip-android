@@ -43,8 +43,12 @@ class FeatureflipClient private constructor(
      * call more than once — the first invocation does the work and subsequent
      * calls are no-ops. Also safe to call from a handle acquired on an
      * already-initialized shared core.
+     *
+     * A no-op on a closed handle: it no longer holds a reference on the core, so it
+     * must not fetch on it or start its background workers (#4901).
      */
     fun initialize() {
+        if (disposed.get()) return
         core.initialize()
     }
 
@@ -295,9 +299,16 @@ class FeatureflipClient private constructor(
          * Returns the shared core's current refcount for the given client
          * key, or 0 if no core is cached for that key.
          *
-         * **Diagnostic only** — not part of the stable API surface. Exposed
-         * as `public` so cross-module integration tests can observe factory
-         * state, but may change or be removed in a minor version.
+         * **Diagnostic, but depended on.** Exposed as `public` so cross-module
+         * integration tests can observe factory state. Unlike the other
+         * `debug*` members, it must NOT be removed, renamed or have its
+         * signature or meaning changed without a coordinated release of
+         * `featureflip-android-openfeature`: that provider calls it at
+         * initialize to tell whether another handle already shares the core.
+         * Its dependency on this SDK is a minimum version, so an app can pick
+         * up a newer SDK than the provider was built against, and a removal
+         * would surface there as a runtime `NoSuchMethodError`, not a compile
+         * failure.
          */
         @JvmStatic
         fun debugRefCount(clientKey: String): Int =

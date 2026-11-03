@@ -22,12 +22,15 @@ internal class StreamingDataSource(
     private val baseUrl: String,
     private val clientKey: String,
     context: Map<String, Any?>,
-    private val onChange: (Map<String, FlagValue>) -> Unit,
+    // Both delivery callbacks receive the context generation the delivering connection
+    // was opened for. A frame read off the previous user's connection after identify()
+    // carries the old generation, and the core drops it (#4886).
+    private val onChange: (Map<String, FlagValue>, Long) -> Unit,
     // Full snapshot the server sends first on every (re)connect -> apply as a REPLACE.
     // Required, not defaulting to onChange: an omitted snapshot handler would silently
     // merge the connect snapshot and resurrect flags deleted during the outage (#1873),
     // and no dispatch test can see that -- they all pass it explicitly.
-    private val onSnapshot: (Map<String, FlagValue>) -> Unit,
+    private val onSnapshot: (Map<String, FlagValue>, Long) -> Unit,
     // Invoked ONCE per outage, when the stream has failed MAX_RETRIES times, so the
     // core can start polling ALONGSIDE this still-retrying stream. Never a terminal
     // give-up: the connect loop keeps going at the capped backoff (#3075).
@@ -40,6 +43,7 @@ internal class StreamingDataSource(
     // Sent on the stream connect (#4141). The stream uses its own OkHttpClient, so it
     // shares nothing with HttpClient; the core passes the same value to both.
     private val userAgent: String = SdkIdentity.DEFAULT,
+    generation: Long = 0L,
 ) {
     internal data class SSEEvent(val eventType: String, val data: String)
 
@@ -99,6 +103,7 @@ internal class StreamingDataSource(
     private val json = jacksonObjectMapper()
     private val lock = ReentrantLock()
     private var context: Map<String, Any?> = context
+    private var generation: Long = generation
     private var job: Job? = null
     private var activeCall: Call? = null
     private var backoffMs = initialBackoffMs
@@ -154,8 +159,17 @@ internal class StreamingDataSource(
         connectionId = null
     }
 
-    fun updateContext(newContext: Map<String, Any?>) {
-        lock.withLock { context = newContext }
+    /**
+     * Reconnects for [newContext]. Ignored when [generation] is older than the one
+     * already held, for the reason given on [PollingDataSource.updateContext]; an
+     * ignored call does not reconnect either.
+     */
+    fun updateContext(newContext: Map<String, Any?>, generation: Long) {
+        lock.withLock {
+            if (generation < this.generation) return
+            context = newContext
+            this.generation = generation
+        }
         stop()
         start()
     }
@@ -202,7 +216,9 @@ internal class StreamingDataSource(
     }
 
     private fun connect() {
-        val currentContext = lock.withLock { context.toMap() }
+        // Read together: every frame this connection delivers is tagged with the
+        // generation its context belongs to.
+        val (currentContext, connectedFor) = lock.withLock { context.toMap() to generation }
         val url = buildStreamUrl(baseUrl, clientKey, currentContext)
 
         val request = Request.Builder()
@@ -218,17 +234,17 @@ internal class StreamingDataSource(
             if (response.code != 200) return
 
             val reader = response.body.source().inputStream().bufferedReader()
-            readSseStream(reader)
+            readSseStream(reader, connectedFor)
         }
     }
 
-    private fun readSseStream(reader: BufferedReader) {
+    private fun readSseStream(reader: BufferedReader, connectedFor: Long) {
         val lineBuffer = mutableListOf<String>()
         while (true) {
             val line = reader.readLine() ?: break
             if (line.isEmpty()) {
                 parseSSEEvent(lineBuffer)?.let {
-                    handleEvent(it)
+                    handleEvent(it, connectedFor)
                     // AFTER the store has been updated, never before: retiring the
                     // fallback poller is what this signals, and a poller retired one
                     // frame early can still land an older whole-store replace on top
@@ -274,7 +290,7 @@ internal class StreamingDataSource(
         if (recovered) onStreamRecovered?.invoke()
     }
 
-    internal fun handleEvent(event: SSEEvent) {
+    internal fun handleEvent(event: SSEEvent, connectedFor: Long = lock.withLock { generation }) {
         if (event.eventType == "connection-ready") {
             try {
                 val data: Map<String, String> = json.readValue(event.data)
@@ -289,7 +305,11 @@ internal class StreamingDataSource(
             // store (drops flags deleted during the outage). Deltas omit it -> MERGE.
             // Keyed off the explicit marker, not event order, so a delta racing ahead
             // of the snapshot can't be mistaken for a full replace.
-            if (response.full) onSnapshot(response.flags) else onChange(response.flags)
+            if (response.full) {
+                onSnapshot(response.flags, connectedFor)
+            } else {
+                onChange(response.flags, connectedFor)
+            }
         } catch (_: Exception) {
             // Ignore parse errors
         }

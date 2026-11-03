@@ -11,11 +11,15 @@ internal class PollingDataSource(
     private val httpClient: HttpClient,
     context: Map<String, Any?>,
     private val intervalMs: Long,
-    private val onChange: (Map<String, FlagValue>) -> Unit,
+    // Receives each poll's flags with the context generation the poll was REQUESTED
+    // for, so the core can drop a response that identify() has since superseded (#4886).
+    private val onChange: (Map<String, FlagValue>, Long) -> Unit,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    generation: Long = 0L,
 ) {
     private val lock = ReentrantLock()
     private var context: Map<String, Any?> = context
+    private var generation: Long = generation
     private var job: Job? = null
 
     // Cancelling the job cannot interrupt an in-flight pollOnce: it is not a suspend
@@ -48,16 +52,29 @@ internal class PollingDataSource(
         job = null
     }
 
-    fun updateContext(newContext: Map<String, Any?>) {
-        lock.withLock { context = newContext }
+    /**
+     * Points later polls at [newContext]. Ignored when [generation] is older than the
+     * one already held: identify() retargets the sources after leaving the snapshot
+     * lock, under a lock two identify() calls can hold together, so the older one can
+     * arrive second. Applied, it would leave every later poll asking for a user the
+     * core has moved past, all of them dropped as stale.
+     */
+    fun updateContext(newContext: Map<String, Any?>, generation: Long) {
+        lock.withLock {
+            if (generation < this.generation) return
+            context = newContext
+            this.generation = generation
+        }
     }
 
     internal fun pollOnce() {
-        val currentContext = lock.withLock { context.toMap() }
+        // Read together, so the generation a response is tagged with is the one its
+        // request was made for.
+        val (currentContext, requestedFor) = lock.withLock { context.toMap() to generation }
         try {
             val result = httpClient.evaluate(currentContext)
             if (stopped) return
-            onChange(result.flags)
+            onChange(result.flags, requestedFor)
         } catch (_: Exception) {
             // Silent — don't crash on network errors
         }

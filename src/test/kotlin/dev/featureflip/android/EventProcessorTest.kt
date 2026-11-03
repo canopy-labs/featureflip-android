@@ -140,4 +140,25 @@ class EventProcessorTest {
 
         assertThat(server.requestCount).isEqualTo(1)
     }
+
+    @Test
+    fun `start after markClosed launches no periodic flush`() {
+        // initialize() can reach start() after the last handle's close() has already
+        // marked the processor closed (#4901). A periodic job launched then would tick
+        // on the released core for the life of the process.
+        val supervisor = SupervisorJob()
+        val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
+        val processor = EventProcessor(
+            httpClient,
+            flushIntervalMs = 60_000,
+            batchSize = 100,
+            scope = CoroutineScope(Dispatchers.IO + supervisor),
+        )
+
+        processor.markClosed()
+        processor.start()
+
+        assertThat(supervisor.children.count()).isZero()
+        supervisor.cancel()
+    }
 }

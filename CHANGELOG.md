@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.5.1 — 2026-11-03
+
+### Fixed
+
+- A response requested for the previous user can no longer overwrite the new user's flags after `identify()`. A poll or stream frame still on the wire when `identify()` swapped users used to replace the new user's values with the old ones until the next poll, and since 3.5.0 it also told `onUpdate` listeners about the flip. The same applied to `initialize()`'s first fetch when `identify()` finished before it, and to an `identify()` whose response arrived after a later `identify()` had already been applied. Each of these is now dropped, and the last `identify()` wins. (#4886)
+- Closing the last handle while `initialize()` was still fetching no longer leaves a client that streams forever. `initialize()` used to start the data source, the event processor and the lifecycle observer on the released core anyway, and nothing could stop them. It now starts none of them, and logs that it was closed. Closing during `identify()` no longer reconnects the released core's stream either, and `initialize()` on a closed handle does nothing. (#4901)
+
 ## 3.5.0 — 2026-11-02
 
 ### Added
