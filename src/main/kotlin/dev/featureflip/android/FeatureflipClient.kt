@@ -106,7 +106,9 @@ class FeatureflipClient private constructor(
      * ```
      *
      * For [identify], the notification is delivered synchronously on the identify
-     * caller's thread, before `identify()` returns.
+     * caller's thread, before `identify()` returns. When identify calls overlap, only
+     * the most recently started one applies and notifies: an earlier call that
+     * completes later returns without applying its flags or notifying listeners.
      *
      * Returns an idempotent unsubscribe function. On a closed handle this is a
      * no-op and the returned function does nothing. [close] removes this handle's
@@ -151,6 +153,17 @@ class FeatureflipClient private constructor(
 
     // -- Identify / track / flush --
 
+    /**
+     * Switches to [context], fetches that user's flags and applies them, then notifies
+     * [onUpdate] listeners of the keys that changed before returning. Blocks on the
+     * network, so call it off the main thread.
+     *
+     * Overlapping calls: the most recently STARTED identify wins. An earlier call whose
+     * response arrives after a later one has been applied returns without applying its
+     * flags, retargeting the data sources or notifying listeners, so the last user you
+     * asked for is the one served. A call that fails throws; it leaves the previous
+     * user's flags in place.
+     */
     fun identify(context: Map<String, Any?>) = core.identify(context)
 
     fun track(eventName: String, metadata: Map<String, Any?>? = null) =

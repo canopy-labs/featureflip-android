@@ -16,6 +16,12 @@ internal class FlagCache(
 ) {
     private val lock = ReentrantReadWriteLock()
     private var flags: Map<String, FlagValue> = emptyMap()
+    private var appliedGeneration = 0L
+    private var hasApplied = false
+
+    // Serialises file writes. Each one reads the in-memory flags INSIDE this lock, so
+    // whichever write runs last persists the newest state, however the writers interleave.
+    private val persistLock = Any()
     private val json = jacksonObjectMapper()
 
     private val cacheFile: File = run {
@@ -24,11 +30,26 @@ internal class FlagCache(
         File(dir, "${safeKey}_flags.json")
     }
 
-    fun setAll(newFlags: Map<String, FlagValue>) {
-        lock.write {
-            flags = newFlags
+    /**
+     * Replaces the cached flags, unless [generation] is older than the newest this cache
+     * has already applied. The caller tags a write with the context generation its flags
+     * were computed for; the write itself runs after the caller has released its own
+     * locks, so a write for the previous user can arrive after the next user's, and
+     * applying it would leave that user's flags on disk for the next cold start (#4937).
+     * Equal generations apply in arrival order.
+     */
+    fun setAll(newFlags: Map<String, FlagValue>, generation: Long = 0L) {
+        val applied = lock.write {
+            if (generation < appliedGeneration) {
+                false
+            } else {
+                appliedGeneration = generation
+                hasApplied = true
+                flags = newFlags
+                true
+            }
         }
-        persistToDisk()
+        if (applied) persistToDisk()
     }
 
     fun get(key: String): FlagValue? = lock.read { flags[key] }
@@ -40,7 +61,8 @@ internal class FlagCache(
         try {
             val data = cacheFile.readText()
             val loaded: Map<String, FlagValue> = json.readValue(data)
-            lock.write { flags = loaded }
+            // A setAll that landed during the file read is newer than what was read.
+            lock.write { if (!hasApplied) flags = loaded }
         } catch (_: Exception) {
             // Corrupt cache — ignore and start fresh
         }
@@ -48,9 +70,11 @@ internal class FlagCache(
 
     private fun persistToDisk() {
         try {
-            cacheFile.parentFile?.mkdirs()
-            val data = json.writeValueAsString(lock.read { flags })
-            cacheFile.writeText(data)
+            synchronized(persistLock) {
+                cacheFile.parentFile?.mkdirs()
+                val data = json.writeValueAsString(lock.read { flags })
+                cacheFile.writeText(data)
+            }
         } catch (_: Exception) {
             // Best-effort persistence
         }

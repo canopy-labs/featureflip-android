@@ -125,6 +125,9 @@ internal class StreamingDataSource(
     internal var sseClient: OkHttpClient? = null
         private set
 
+    /** Whether the connect loop is live: started and not since stopped. */
+    internal val isRunning: Boolean get() = job?.isActive == true
+
     private fun createClient(): OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS) // No read timeout for SSE
@@ -161,12 +164,15 @@ internal class StreamingDataSource(
 
     /**
      * Reconnects for [newContext]. Ignored when [generation] is older than the one
-     * already held, for the reason given on [PollingDataSource.updateContext]; an
-     * ignored call does not reconnect either.
+     * already held, for the reason given on [PollingDataSource.updateContext], and
+     * when it is EQUAL: a source is built with the context and generation current at
+     * that moment, so an equal generation means identify()'s swap happened before this
+     * source started and it already carries [newContext]. Reconnecting would only drop
+     * a healthy connection. An ignored call does not reconnect either.
      */
     fun updateContext(newContext: Map<String, Any?>, generation: Long) {
         lock.withLock {
-            if (generation < this.generation) return
+            if (generation <= this.generation) return
             context = newContext
             this.generation = generation
         }
@@ -178,8 +184,9 @@ internal class StreamingDataSource(
         while (currentCoroutineContext().isActive) {
             try {
                 connect()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 if (!currentCoroutineContext().isActive) return
+                logStreamFailure(e.javaClass.name, "stream connection failed, will retry: $e")
             }
             if (!currentCoroutineContext().isActive) return
 
@@ -215,6 +222,22 @@ internal class StreamingDataSource(
         }
     }
 
+    // Set once an outage has been logged, cleared when config is next delivered, so an
+    // offline device logs the transition to failing, not every retry.
+    @Volatile
+    private var lastLoggedFailure: String? = null
+
+    /**
+     * A failed connect is expected during an outage and retried, so it gets one line per
+     * outage and kind of failure (HTTP status or exception class) rather than an alarm per
+     * retry. It is what tells a revoked key (HTTP 401/403) from an unreachable host.
+     */
+    private fun logStreamFailure(kind: String, message: String) {
+        if (kind == lastLoggedFailure) return
+        lastLoggedFailure = kind
+        System.err.println("[featureflip] $message")
+    }
+
     private fun connect() {
         // Read together: every frame this connection delivers is tagged with the
         // generation its context belongs to.
@@ -231,7 +254,10 @@ internal class StreamingDataSource(
         val call = client.newCall(request)
         lock.withLock { activeCall = call }
         call.execute().use { response ->
-            if (response.code != 200) return
+            if (response.code != 200) {
+                logStreamFailure("HTTP ${response.code}", "stream rejected: HTTP ${response.code}, will retry")
+                return
+            }
 
             val reader = response.body.source().inputStream().bufferedReader()
             readSseStream(reader, connectedFor)
@@ -280,6 +306,7 @@ internal class StreamingDataSource(
      * whole-store replaces reverting the deltas this stream applies.
      */
     private fun onConfigDelivered() {
+        lastLoggedFailure = null
         val recovered = lock.withLock {
             retryCount = 0
             backoffMs = initialBackoffMs
@@ -293,9 +320,14 @@ internal class StreamingDataSource(
     internal fun handleEvent(event: SSEEvent, connectedFor: Long = lock.withLock { generation }) {
         if (event.eventType == "connection-ready") {
             try {
+                // A late connection-ready on a connection identify() has since replaced
+                // must not overwrite the ID of the current one.
+                if (connectedFor != lock.withLock { generation }) return
                 val data: Map<String, String> = json.readValue(event.data)
                 connectionId = data["connectionId"]
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                System.err.println("[featureflip] ignoring unparseable connection-ready event: $e")
+            }
             return
         }
         if (event.eventType != "flags-updated") return
@@ -310,8 +342,9 @@ internal class StreamingDataSource(
             } else {
                 onChange(response.flags, connectedFor)
             }
-        } catch (_: Exception) {
-            // Ignore parse errors
+        } catch (e: Exception) {
+            // The store keeps its last-known-good flags; say so rather than drop it.
+            System.err.println("[featureflip] ignoring unparseable flags-updated event: $e")
         }
     }
 }

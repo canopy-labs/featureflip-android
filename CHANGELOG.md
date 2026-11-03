@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.5.2 — 2026-11-03
+
+### Fixed
+
+- The on-disk flag cache no longer keeps the previous user's flags after `identify()`. A poll or stream update applied just before `identify()` could finish writing to disk after the new user's flags, so the next cold start served the old user's values until its first fetch returned, or indefinitely while offline. A cache write for a user that a later `identify()` has replaced is now dropped. (#4937)
+- `identify()` no longer drops a healthy stream connection it did not need to replace. When the stream had been started after `identify()` swapped users, `identify()` reconnected it anyway. (#4937)
+- Failed polls, rejected or failed stream connections (including the HTTP status, so a revoked key shows as 401/403) and unparseable stream events are now logged to `System.err` instead of being swallowed, so they no longer look like a healthy client. An outage logs once per kind of failure (an HTTP status or an exception type), not on every retry, so a revoked key that follows an unreachable host is still reported. Behavior is unchanged: the SDK keeps serving its last known flags and retries. (#4937)
+
 ## 3.5.1 — 2026-11-03
 
 ### Fixed

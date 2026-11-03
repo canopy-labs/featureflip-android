@@ -93,6 +93,7 @@ class CloseDuringStartTest {
         assertThat(FeatureflipClient.debugLiveCoreCount()).isZero()
         releaseFetch.countDown()
         init.join(10_000)
+        assertThat(init.isAlive).`as`("initialize() must have returned").isFalse()
 
         assertThat(client.hasStreamingSource()).`as`("no stream on a released core").isFalse()
         assertThat(client.hasPollingSource()).`as`("no poller on a released core").isFalse()

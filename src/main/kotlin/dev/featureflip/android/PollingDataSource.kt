@@ -34,6 +34,9 @@ internal class PollingDataSource(
     @Volatile
     private var stopped = false
 
+    @Volatile
+    private var lastLoggedFailure: String? = null
+
     fun start() {
         job?.cancel()
         stopped = false
@@ -74,9 +77,18 @@ internal class PollingDataSource(
         try {
             val result = httpClient.evaluate(currentContext)
             if (stopped) return
+            lastLoggedFailure = null
             onChange(result.flags, requestedFor)
-        } catch (_: Exception) {
-            // Silent — don't crash on network errors
+        } catch (e: Exception) {
+            // Never crashes the poller, but never silent either: the next poll retries.
+            // Logged once per outage and kind of failure, so an offline device
+            // does not log every interval forever.
+            // A different kind of failure (say a 401 after an unreachable host) is news.
+            val kind = if (e.message?.startsWith("HTTP ") == true) e.message else e.javaClass.name
+            if (kind != lastLoggedFailure) {
+                lastLoggedFailure = kind
+                System.err.println("[featureflip] poll failed, will retry in ${intervalMs}ms: $e")
+            }
         }
     }
 }

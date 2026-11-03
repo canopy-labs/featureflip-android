@@ -184,6 +184,37 @@ class StreamingDataSourceTest {
     }
 
     @Test
+    fun `updateContext reconnects for a newer generation, not for an equal or older one`() {
+        // A source is built with the context and generation current when it starts, so an
+        // equal generation means it already carries that context (#4937).
+        HeldOpenStreamServer(fullSnapshotJson("flag-a")).use { server ->
+            val ds = StreamingDataSource(
+                baseUrl = server.baseUrl,
+                clientKey = "key",
+                context = mapOf("user_id" to "u1"),
+                onChange = { _, _ -> },
+                onSnapshot = { _, _ -> },
+                generation = 3L,
+            )
+            ds.start()
+            assertThat(server.awaitUntil { server.streams.size == 1 }).isTrue()
+
+            // start() replaces sseClient synchronously, so an unchanged instance means the
+            // call did not reconnect.
+            val client = ds.sseClient
+            ds.updateContext(mapOf("user_id" to "u1"), 3L)
+            ds.updateContext(mapOf("user_id" to "u0"), 2L)
+            assertThat(ds.sseClient).`as`("an equal or older generation must not reconnect").isSameAs(client)
+
+            ds.updateContext(mapOf("user_id" to "u2"), 4L)
+            assertThat(ds.sseClient).`as`("a newer generation reconnects").isNotSameAs(client)
+            assertThat(server.awaitUntil { server.streams.size == 2 }).isTrue()
+
+            ds.stop()
+        }
+    }
+
+    @Test
     fun `stream that stays down arms the fallback once and keeps retrying underneath`() {
         // The fallback is ADDITIVE, never terminal (#3075). Returning out of the
         // connect loop at the cap left the app blind to real-time updates — kill

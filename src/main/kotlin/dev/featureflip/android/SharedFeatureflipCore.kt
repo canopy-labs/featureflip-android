@@ -121,6 +121,23 @@ internal class SharedFeatureflipCore private constructor(
     @Volatile
     internal var afterIdentifyAppliedForTest: (() -> Unit)? = null
 
+    // Test seam: runs just before a cache write, after the snapshot lock is released,
+    // with the generation the write is tagged with. It holds a write in the window
+    // where a later identify() can overtake it (#4937).
+    @Volatile
+    internal var beforeCacheWriteForTest: ((Long) -> Unit)? = null
+
+    // Test seam: runs inside handleForeground()'s restart, under the read lock, after the
+    // sources have been read into locals and before they are started. Without the lock,
+    // a detachSources() running here would leave the restart starting a source that
+    // close() already stopped.
+    @Volatile
+    internal var duringForegroundRestartForTest: (() -> Unit)? = null
+
+    // Test seam: runs when handleForeground()'s restart has finished.
+    @Volatile
+    internal var afterForegroundRestartForTest: (() -> Unit)? = null
+
     private var owningMap: ConcurrentHashMap<String, SharedFeatureflipCore>? = null
     private var owningKey: String? = null
 
@@ -233,7 +250,7 @@ internal class SharedFeatureflipCore private constructor(
             // Fetch initial flags.
             try {
                 val response = httpClient.evaluate(initialContext, config.initTimeoutMs)
-                if (loadSnapshotIfCurrent(response.flags, requestedFor)) cache.setAll(response.flags)
+                if (loadSnapshotIfCurrent(response.flags, requestedFor)) persist(response.flags, requestedFor)
             } catch (e: Exception) {
                 // NON-TERMINAL BY DESIGN — do not rethrow, and do not leave
                 // _initialized false. Any flags already loaded from disk above keep
@@ -499,7 +516,7 @@ internal class SharedFeatureflipCore private constructor(
             }
             diffKeys(before, flagSnapshot) to generation
         }
-        cache.setAll(response.flags)
+        persist(response.flags, generation)
         afterIdentifyAppliedForTest?.invoke()
 
         // Read and retargeted under the lock detachSources() writes under, so a close()
@@ -553,6 +570,9 @@ internal class SharedFeatureflipCore private constructor(
     internal fun debugBufferedEventCount(): Int = eventProcessor.bufferedEventCount()
 
     internal fun hasStreamingSource(): Boolean = lock.read { streamingDataSource != null }
+
+    /** Test-only: the live streaming source, to observe whether it is running. */
+    internal fun streamingSourceForTest(): StreamingDataSource? = lock.read { streamingDataSource }
 
     internal fun hasPollingSource(): Boolean = lock.read { pollingDataSource != null }
 
@@ -679,7 +699,23 @@ internal class SharedFeatureflipCore private constructor(
 
     private fun handleStreamingUpdate(delta: Map<String, FlagValue>, requestedFor: Long) {
         val merged = mergeIfCurrent(delta, requestedFor) ?: return
-        cache.setAll(merged)
+        persist(merged, requestedFor)
+    }
+
+    /**
+     * Writes [flags] to the disk cache, tagged with the context [generation] they were
+     * computed for. The write happens after [snapshotLock] is released (no disk I/O
+     * under it), so a later identify() can overtake it; [FlagCache] drops a write
+     * older than the newest it has applied, so the previous user's flags never replace
+     * the current user's on disk (#4937). A write with no generation (a test client's)
+     * is tagged with the current one.
+     */
+    private fun persist(flags: Map<String, FlagValue>, generation: Long?) {
+        // A released core must not write the per-key file a new core may have taken over.
+        if (isShutDown.get()) return
+        val tag = generation ?: lock.read { contextGeneration }
+        beforeCacheWriteForTest?.invoke(tag)
+        cache.setAll(flags, tag)
     }
 
     /**
@@ -690,7 +726,7 @@ internal class SharedFeatureflipCore private constructor(
     internal fun applyFullSnapshot(flags: Map<String, FlagValue>, requestedFor: Long? = null) {
         val changed = replaceSnapshotAndDiff(flags, requestedFor) ?: return
         notifyUpdate(changed)
-        cache.setAll(flags)
+        persist(flags, requestedFor)
     }
 
     /**
@@ -787,9 +823,13 @@ internal class SharedFeatureflipCore private constructor(
             // close() released (#4901) or a retired fallback poller cannot be restarted
             // here, which would leave it running with nothing holding a reference.
             lock.read {
-                streamingDataSource?.start()
-                pollingDataSource?.start()
+                val stream = streamingDataSource
+                val poller = pollingDataSource
+                duringForegroundRestartForTest?.invoke()
+                stream?.start()
+                poller?.start()
             }
+            afterForegroundRestartForTest?.invoke()
         }
     }
 

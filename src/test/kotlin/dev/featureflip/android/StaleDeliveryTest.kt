@@ -206,6 +206,7 @@ class StaleDeliveryTest {
         client.identify(mapOf("user_id" to "user-b"))
         releaseFetch.countDown()
         init.join(10_000)
+        assertThat(init.isAlive).`as`("initialize() must have returned").isFalse()
 
         assertThat(client.stringVariation("x", "default"))
             .`as`("initialize's fetch was for user-a; identify(user-b) already replaced it")
