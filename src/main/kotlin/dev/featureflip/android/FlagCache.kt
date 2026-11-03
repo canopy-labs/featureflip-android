@@ -16,7 +16,7 @@ internal class FlagCache(
 ) {
     private val lock = ReentrantReadWriteLock()
     private var flags: Map<String, FlagValue> = emptyMap()
-    private var appliedGeneration = 0L
+    private var appliedVersion = 0L
     private var hasApplied = false
 
     // Serialises file writes. Each one reads the in-memory flags INSIDE this lock, so
@@ -31,19 +31,21 @@ internal class FlagCache(
     }
 
     /**
-     * Replaces the cached flags, unless [generation] is older than the newest this cache
-     * has already applied. The caller tags a write with the context generation its flags
-     * were computed for; the write itself runs after the caller has released its own
-     * locks, so a write for the previous user can arrive after the next user's, and
-     * applying it would leave that user's flags on disk for the next cold start (#4937).
-     * Equal generations apply in arrival order.
+     * Replaces the cached flags, unless [version] is older than the newest this cache has
+     * already applied. The caller tags each write with the version of the in-memory
+     * snapshot it was taken from. The write runs after the caller has released its own
+     * locks, so writes can arrive here in any order: one for the user a later identify()
+     * replaced (#4937), or an older delivery for the same user, say a stream delta and a
+     * fallback poll on different threads (#4945). Applying either would leave a snapshot
+     * memory has already moved past on disk, and the next cold start would serve it.
+     * Equal versions apply in arrival order.
      */
-    fun setAll(newFlags: Map<String, FlagValue>, generation: Long = 0L) {
+    fun setAll(newFlags: Map<String, FlagValue>, version: Long = 0L) {
         val applied = lock.write {
-            if (generation < appliedGeneration) {
+            if (version < appliedVersion) {
                 false
             } else {
-                appliedGeneration = generation
+                appliedVersion = version
                 hasApplied = true
                 flags = newFlags
                 true

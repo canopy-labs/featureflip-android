@@ -53,6 +53,11 @@ internal class SharedFeatureflipCore private constructor(
     private val updateListeners = CopyOnWriteArrayList<FlagUpdateListener>()
     private var flagSnapshot: MutableMap<String, FlagValue> = initialFlags.toMutableMap()
 
+    // Bumped on every change to flagSnapshot, under snapshotLock (write), and handed to
+    // the disk write that change makes. Those writes run after the lock is released, so
+    // they can reach the cache out of order; it keeps the newest (#4937, #4945).
+    private var snapshotVersion = 0L
+
     private val lock = ReentrantReadWriteLock()
 
     // Which user the snapshot belongs to (#4886). Every applied identify() bumps it, and
@@ -122,8 +127,8 @@ internal class SharedFeatureflipCore private constructor(
     internal var afterIdentifyAppliedForTest: (() -> Unit)? = null
 
     // Test seam: runs just before a cache write, after the snapshot lock is released,
-    // with the generation the write is tagged with. It holds a write in the window
-    // where a later identify() can overtake it (#4937).
+    // with the snapshot version the write is tagged with. It holds a write in the
+    // window where a later snapshot change can overtake it (#4937, #4945).
     @Volatile
     internal var beforeCacheWriteForTest: ((Long) -> Unit)? = null
 
@@ -250,7 +255,7 @@ internal class SharedFeatureflipCore private constructor(
             // Fetch initial flags.
             try {
                 val response = httpClient.evaluate(initialContext, config.initTimeoutMs)
-                if (loadSnapshotIfCurrent(response.flags, requestedFor)) persist(response.flags, requestedFor)
+                loadSnapshotIfCurrent(response.flags, requestedFor)?.let { persist(response.flags, it) }
             } catch (e: Exception) {
                 // NON-TERMINAL BY DESIGN — do not rethrow, and do not leave
                 // _initialized false. Any flags already loaded from disk above keep
@@ -501,7 +506,7 @@ internal class SharedFeatureflipCore private constructor(
         // Swap the flags and the context together, bumping the generation, so a poll
         // or stream frame still on the wire for the previous user is recognisably
         // stale (#4886). Diffed under the same lock as the swap.
-        val (changed, generation) = snapshotLock.write {
+        val (changed, generation, version) = snapshotLock.write {
             // Overtaken by a later identify() that has already been applied: its
             // response is the newer one, and applying this one would swap the earlier
             // user back in. Silent: the caller's last identify() is being served.
@@ -514,9 +519,9 @@ internal class SharedFeatureflipCore private constructor(
                 currentUserId = userIdOf(resolved)
                 ++contextGeneration
             }
-            diffKeys(before, flagSnapshot) to generation
+            Triple(diffKeys(before, flagSnapshot), generation, ++snapshotVersion)
         }
-        persist(response.flags, generation)
+        persist(response.flags, version)
         afterIdentifyAppliedForTest?.invoke()
 
         // Read and retargeted under the lock detachSources() writes under, so a close()
@@ -578,7 +583,10 @@ internal class SharedFeatureflipCore private constructor(
 
     /** Test-only: replace the snapshot with hand-built [FlagValue]s. */
     internal fun applyFlagUpdateForTest(flags: Map<String, FlagValue>) {
-        snapshotLock.write { flagSnapshot = flags.toMutableMap() }
+        snapshotLock.write {
+            flagSnapshot = flags.toMutableMap()
+            ++snapshotVersion
+        }
     }
 
     // -- Private --
@@ -698,24 +706,23 @@ internal class SharedFeatureflipCore private constructor(
     private fun isLiveStreamingSource(): Boolean = lock.read { streamingDataSource } != null
 
     private fun handleStreamingUpdate(delta: Map<String, FlagValue>, requestedFor: Long) {
-        val merged = mergeIfCurrent(delta, requestedFor) ?: return
-        persist(merged, requestedFor)
+        val (merged, version) = mergeIfCurrent(delta, requestedFor) ?: return
+        persist(merged, version)
     }
 
     /**
-     * Writes [flags] to the disk cache, tagged with the context [generation] they were
-     * computed for. The write happens after [snapshotLock] is released (no disk I/O
-     * under it), so a later identify() can overtake it; [FlagCache] drops a write
-     * older than the newest it has applied, so the previous user's flags never replace
-     * the current user's on disk (#4937). A write with no generation (a test client's)
-     * is tagged with the current one.
+     * Writes [flags] to the disk cache, tagged with the [snapshotVersion] they were
+     * applied at. The write happens after [snapshotLock] is released (no disk I/O under
+     * it), so a later change to the snapshot can overtake it: an identify() (#4937), or
+     * another delivery for the same user on a different thread (#4945). [FlagCache]
+     * drops a write older than the newest it has applied, so the disk ends up holding
+     * the snapshot memory last moved to.
      */
-    private fun persist(flags: Map<String, FlagValue>, generation: Long?) {
+    private fun persist(flags: Map<String, FlagValue>, version: Long) {
         // A released core must not write the per-key file a new core may have taken over.
         if (isShutDown.get()) return
-        val tag = generation ?: lock.read { contextGeneration }
-        beforeCacheWriteForTest?.invoke(tag)
-        cache.setAll(flags, tag)
+        beforeCacheWriteForTest?.invoke(version)
+        cache.setAll(flags, version)
     }
 
     /**
@@ -724,9 +731,9 @@ internal class SharedFeatureflipCore private constructor(
      * applies unconditionally.
      */
     internal fun applyFullSnapshot(flags: Map<String, FlagValue>, requestedFor: Long? = null) {
-        val changed = replaceSnapshotAndDiff(flags, requestedFor) ?: return
+        val (changed, version) = replaceSnapshotAndDiff(flags, requestedFor) ?: return
         notifyUpdate(changed)
-        persist(flags, requestedFor)
+        persist(flags, version)
     }
 
     /**
@@ -743,27 +750,31 @@ internal class SharedFeatureflipCore private constructor(
         requestedFor != null && requestedFor != contextGeneration
 
     /**
-     * Swaps the snapshot under the write lock and returns the keys that changed, or
-     * null when the delivery is stale (see [isStale]) and nothing was swapped.
+     * Swaps the snapshot under the write lock and returns the keys that changed with
+     * the new [snapshotVersion], or null when the delivery is stale (see [isStale]) and
+     * nothing was swapped.
      */
-    private fun replaceSnapshotAndDiff(flags: Map<String, FlagValue>, requestedFor: Long?): List<String>? =
+    private fun replaceSnapshotAndDiff(
+        flags: Map<String, FlagValue>,
+        requestedFor: Long?,
+    ): Pair<List<String>, Long>? =
         snapshotLock.write {
             if (isStale(requestedFor)) return null
             val before = flagSnapshot
             flagSnapshot = flags.toMutableMap()
-            diffKeys(before, flagSnapshot)
+            diffKeys(before, flagSnapshot) to ++snapshotVersion
         }
 
     /**
-     * initialize()'s load, from disk and from the initial fetch; false when an
-     * identify() has superseded it. Silent: the initial load is reported by readiness,
-     * not as an update.
+     * initialize()'s load, from disk and from the initial fetch. Returns the new
+     * [snapshotVersion], or null when an identify() has superseded it. Silent: the
+     * initial load is reported by readiness, not as an update.
      */
-    private fun loadSnapshotIfCurrent(flags: Map<String, FlagValue>, requestedFor: Long): Boolean =
+    private fun loadSnapshotIfCurrent(flags: Map<String, FlagValue>, requestedFor: Long): Long? =
         snapshotLock.write {
-            if (isStale(requestedFor)) return false
+            if (isStale(requestedFor)) return null
             flagSnapshot = flags.toMutableMap()
-            true
+            ++snapshotVersion
         }
 
     internal fun addUpdateListener(listener: FlagUpdateListener): () -> Unit {
@@ -785,10 +796,13 @@ internal class SharedFeatureflipCore private constructor(
     }
 
     internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> =
-        checkNotNull(mergeIfCurrent(delta, requestedFor = null))
+        checkNotNull(mergeIfCurrent(delta, requestedFor = null)).first
 
-    /** Merges a stream delta and notifies; null when the delta is stale (see [isStale]). */
-    private fun mergeIfCurrent(delta: Map<String, FlagValue>, requestedFor: Long?): Map<String, FlagValue>? {
+    /**
+     * Merges a stream delta and notifies. Returns the merged snapshot with its
+     * [snapshotVersion], or null when the delta is stale (see [isStale]).
+     */
+    private fun mergeIfCurrent(delta: Map<String, FlagValue>, requestedFor: Long?): Pair<Map<String, FlagValue>, Long>? {
         val keys: List<String>
         val merged = snapshotLock.write {
             if (isStale(requestedFor)) return null
@@ -801,7 +815,7 @@ internal class SharedFeatureflipCore private constructor(
                 }
             }
             keys = diffKeys(before, flagSnapshot)
-            flagSnapshot.toMap()
+            flagSnapshot.toMap() to ++snapshotVersion
         }
         notifyUpdate(keys)
         return merged

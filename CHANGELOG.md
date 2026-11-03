@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.5.3 — 2026-11-03
+
+### Fixed
+
+- The on-disk flag cache now always ends up holding the flags the client is serving. Two updates for the same user, such as a stream update and a fallback poll or two stream updates handled on different threads, could finish writing to disk in the opposite order to the one they were applied in, leaving the older flags on disk. The next cold start served them until its first fetch returned, or indefinitely while offline. Each disk write is now tagged with the in-memory snapshot it came from, and a write older than the newest one already written is dropped. This also covers the cross-user case fixed in 3.5.2. (#4945)
+
 ## 3.5.2 — 2026-11-03
 
 ### Fixed
