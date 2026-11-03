@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.5.0 — 2026-11-02
+
+### Added
+
+- `FeatureflipClient.onUpdate(listener)` registers a `FlagUpdateListener` and returns a function that unsubscribes it. The listener fires when a streamed update that changes a flag, or a removed flag, arrives, when a poll or connect snapshot changes anything, and after a successful `identify()`. It receives the keys that changed, sorted ascending and never empty. It does not fire during `initialize()` or after a failed `identify()`. Listeners run on the delivering thread, so they must not block. (#4883)
+
 ## 3.4.1 — 2026-10-30
 
 ### Fixed

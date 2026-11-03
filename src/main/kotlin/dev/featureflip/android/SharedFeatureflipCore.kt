@@ -12,6 +12,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -46,6 +47,7 @@ internal class SharedFeatureflipCore private constructor(
     enqueueRead: ((SdkEvent) -> Unit)? = null,
 ) {
     private val snapshotLock = ReentrantReadWriteLock()
+    private val updateListeners = CopyOnWriteArrayList<FlagUpdateListener>()
     private var flagSnapshot: MutableMap<String, FlagValue> = initialFlags.toMutableMap()
 
     private val lock = ReentrantReadWriteLock()
@@ -432,7 +434,7 @@ internal class SharedFeatureflipCore private constructor(
         val connectionId = lock.read { streamingDataSource }?.connectionId
         val response = httpClient.identify(resolved, connectionId)
         cache.setAll(response.flags)
-        updateSnapshot(response.flags)
+        val changed = replaceSnapshotAndDiff(response.flags)
 
         val (stream, poller) = lock.write {
             currentContext = resolved
@@ -441,6 +443,8 @@ internal class SharedFeatureflipCore private constructor(
         }
         stream?.updateContext(resolved)
         poller?.updateContext(resolved)
+        // Last, so a listener sees the new user's context and flags together.
+        notifyUpdate(changed)
     }
 
     fun track(eventName: String, metadata: Map<String, Any?>?) {
@@ -501,6 +505,9 @@ internal class SharedFeatureflipCore private constructor(
 
     private fun getFlag(key: String): FlagValue? = snapshotLock.read { flagSnapshot[key] }
 
+    // Silent: the initial load (initialize) is reported by readiness, not as an update.
+    // Every later change goes through replaceSnapshotAndDiff and notifies. forTesting
+    // seeds flagSnapshot directly rather than through here.
     private fun updateSnapshot(flags: Map<String, FlagValue>) {
         snapshotLock.write { flagSnapshot = flags.toMutableMap() }
     }
@@ -522,7 +529,7 @@ internal class SharedFeatureflipCore private constructor(
                 context = ctx,
                 onChange = { flags -> handleStreamingUpdate(flags) },
                 // First flags-updated after (re)connect is the full snapshot -> REPLACE.
-                onSnapshot = { flags -> handleFullUpdate(flags) },
+                onSnapshot = { flags -> applyFullSnapshot(flags) },
                 // Stream exhausted its retries -> poll ALONGSIDE it until it recovers.
                 onFallbackToPolling = { handleStreamingFallback() },
                 onStreamRecovered = { stopFallbackPolling() },
@@ -543,7 +550,7 @@ internal class SharedFeatureflipCore private constructor(
             httpClient = httpClient,
             context = ctx,
             intervalMs = config.pollIntervalMs,
-            onChange = { flags -> handleFullUpdate(flags) },
+            onChange = { flags -> applyFullSnapshot(flags) },
         )
         source.start()
         lock.write { pollingDataSource = source }
@@ -604,13 +611,41 @@ internal class SharedFeatureflipCore private constructor(
         cache.setAll(merged)
     }
 
-    private fun handleFullUpdate(flags: Map<String, FlagValue>) {
-        updateSnapshot(flags)
+    internal fun applyFullSnapshot(flags: Map<String, FlagValue>) {
+        notifyUpdate(replaceSnapshotAndDiff(flags))
         cache.setAll(flags)
     }
 
+    /** Swaps the snapshot under the write lock and returns the keys that changed. */
+    internal fun replaceSnapshotAndDiff(flags: Map<String, FlagValue>): List<String> =
+        snapshotLock.write {
+            val before = flagSnapshot
+            flagSnapshot = flags.toMutableMap()
+            diffKeys(before, flagSnapshot)
+        }
+
+    internal fun addUpdateListener(listener: FlagUpdateListener): () -> Unit {
+        updateListeners.add(listener)
+        return { updateListeners.remove(listener) }
+    }
+
+    /** Called outside [snapshotLock] so a listener can read flags without deadlocking. */
+    internal fun notifyUpdate(keys: List<String>) {
+        if (keys.isEmpty()) return
+        val delivered = java.util.Collections.unmodifiableList(keys)
+        for (listener in updateListeners) {
+            try {
+                listener.onUpdate(delivered)
+            } catch (e: Exception) {
+                System.err.println("[featureflip] flag update listener threw: $e")
+            }
+        }
+    }
+
     internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> {
-        return snapshotLock.write {
+        val keys: List<String>
+        val merged = snapshotLock.write {
+            val before = flagSnapshot.toMap()
             for ((key, value) in delta) {
                 if (value.reason == "FLAG_REMOVED" && value.value == null) {
                     flagSnapshot.remove(key)
@@ -618,8 +653,11 @@ internal class SharedFeatureflipCore private constructor(
                     flagSnapshot[key] = value
                 }
             }
+            keys = diffKeys(before, flagSnapshot)
             flagSnapshot.toMap()
         }
+        notifyUpdate(keys)
+        return merged
     }
 
     private fun handleForeground() {

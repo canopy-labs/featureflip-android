@@ -8,7 +8,7 @@ Android/Kotlin SDK for [Featureflip](https://featureflip.io) — evaluate featur
 
 ```kotlin
 dependencies {
-    implementation("io.featureflip:featureflip-android:3.4.1")
+    implementation("io.featureflip:featureflip-android:3.5.0")
 }
 ```
 
@@ -16,7 +16,7 @@ dependencies {
 
 ```groovy
 dependencies {
-    implementation 'io.featureflip:featureflip-android:3.4.1'
+    implementation 'io.featureflip:featureflip-android:3.5.0'
 }
 ```
 
@@ -94,6 +94,26 @@ Re-evaluate all flags with a new context (e.g., after login):
 ```kotlin
 client.identify(mapOf("user_id" to "123", "plan" to "pro"))
 ```
+
+## Flag updates
+
+Register a listener to learn when flag values change, for example to redraw a screen:
+
+```kotlin
+val mainHandler = Handler(Looper.getMainLooper())
+val unsubscribe = client.onUpdate { keys ->
+    // keys is a sorted, non-empty list of the flags that changed
+    mainHandler.post { render(keys) }
+}
+
+// later
+unsubscribe()
+```
+
+- The listener fires when a streamed update arrives (including a removed flag), when a poll or a stream (re)connect snapshot changes a flag, and after a successful `identify()`. A flag counts as changed when its value, variation, reason or prerequisite key changed. A failed `identify()` does not fire it.
+- It does not fire during `initialize()`. Read flags once after the client is ready, then use `onUpdate` for what changes afterwards.
+- Listeners run on the thread that delivers the change: the stream, the poller, or the caller of `identify()`. Don't block in a listener and don't touch views from it. Hand the work to another thread or dispatcher. A listener that throws is logged to stderr and the others still run.
+- `close()` removes that handle's listeners. A delivery already in progress may still call a listener once after `unsubscribe()` or `close()` returns. Clients built with `forTesting` never notify.
 
 ## Event Tracking
 

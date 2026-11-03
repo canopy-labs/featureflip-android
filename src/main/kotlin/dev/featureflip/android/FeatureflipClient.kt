@@ -2,6 +2,7 @@ package dev.featureflip.android
 
 import okhttp3.Call
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -25,6 +26,7 @@ class FeatureflipClient private constructor(
     private val core: SharedFeatureflipCore,
 ) {
     private val disposed = AtomicBoolean(false)
+    private val subscriptions = CopyOnWriteArrayList<() -> Unit>()
 
     /**
      * Whether the underlying shared core has been initialized.
@@ -59,6 +61,7 @@ class FeatureflipClient private constructor(
      */
     fun close() {
         if (disposed.compareAndSet(false, true)) {
+            dropSubscriptions()
             core.release()
         }
     }
@@ -70,8 +73,56 @@ class FeatureflipClient private constructor(
      */
     suspend fun closeAndAwait() {
         if (disposed.compareAndSet(false, true)) {
+            dropSubscriptions()
             core.releaseAndAwait()
         }
+    }
+
+    private fun dropSubscriptions() {
+        val pending = subscriptions.toList()
+        subscriptions.clear()
+        pending.forEach { it() }
+    }
+
+    /**
+     * Subscribes to flag changes delivered after the initial load, from streaming,
+     * polling, or [identify]. The listener receives the sorted keys whose value or
+     * evaluation details changed; see [FlagUpdateListener] for threading rules.
+     *
+     * The listener runs on the delivering thread, not the main thread, so hand UI
+     * work over to it:
+     *
+     * ```
+     * val mainHandler = Handler(Looper.getMainLooper())
+     * val unsubscribe = client.onUpdate { keys ->
+     *     if ("new-checkout" in keys) mainHandler.post { render() }
+     * }
+     * // later
+     * unsubscribe()
+     * ```
+     *
+     * For [identify], the notification is delivered synchronously on the identify
+     * caller's thread, before `identify()` returns.
+     *
+     * Returns an idempotent unsubscribe function. On a closed handle this is a
+     * no-op and the returned function does nothing. [close] removes this handle's
+     * listeners. A delivery already in progress can still call a listener once after
+     * unsubscribing or closing returns.
+     */
+    fun onUpdate(listener: FlagUpdateListener): () -> Unit {
+        if (disposed.get()) return {}
+        val removeFromCore = core.addUpdateListener(listener)
+        val done = AtomicBoolean(false)
+        lateinit var unsubscribe: () -> Unit
+        unsubscribe = {
+            if (done.compareAndSet(false, true)) {
+                removeFromCore()
+                subscriptions.remove(unsubscribe)
+            }
+        }
+        subscriptions.add(unsubscribe)
+        if (disposed.get()) unsubscribe()
+        return unsubscribe
     }
 
     // -- Variation methods --
@@ -133,6 +184,8 @@ class FeatureflipClient private constructor(
 
     internal fun mergeSnapshot(delta: Map<String, FlagValue>): Map<String, FlagValue> =
         core.mergeSnapshot(delta)
+
+    internal fun applyFullSnapshot(flags: Map<String, FlagValue>) = core.applyFullSnapshot(flags)
 
     internal fun startDataSource() = core.startDataSource()
 
