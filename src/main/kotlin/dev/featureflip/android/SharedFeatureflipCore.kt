@@ -50,6 +50,10 @@ internal class SharedFeatureflipCore private constructor(
     // Lock order: snapshotLock before lock, never the reverse. identify() takes both to
     // swap the snapshot and the context together.
     private val snapshotLock = ReentrantReadWriteLock()
+
+    // The one place the SDK writes diagnostics, with this core's key stripped. Handed to
+    // every component that logs.
+    private val log = SdkLogger(config.clientKey)
     private val updateListeners = CopyOnWriteArrayList<FlagUpdateListener>()
     private var flagSnapshot: MutableMap<String, FlagValue> = initialFlags.toMutableMap()
 
@@ -100,6 +104,7 @@ internal class SharedFeatureflipCore private constructor(
         httpClient = httpClient,
         flushIntervalMs = config.flushIntervalMs,
         batchSize = config.flushBatchSize,
+        log = log,
     )
 
     // One per core, so every handle on a client key shares one dedupe window. Null for
@@ -269,7 +274,7 @@ internal class SharedFeatureflipCore private constructor(
                 // a JSON parse failure otherwise all present exactly like a healthy
                 // start, and the caller cannot tell a working client from a
                 // completely misconfigured one (#2294).
-                System.err.println(
+                log.error(
                     "[featureflip] initial flag fetch failed, serving cached or default " +
                         "values until the data source recovers: $e",
                 )
@@ -280,7 +285,7 @@ internal class SharedFeatureflipCore private constructor(
             // ever stop what is started on it from here: the stream would retry forever
             // (#4901). Logged because the caller sees a client that never streamed.
             if (isShutDown.get()) {
-                System.err.println(
+                log.error(
                     "[featureflip] client closed during initialize(); not starting the data source",
                 )
                 return
@@ -299,6 +304,7 @@ internal class SharedFeatureflipCore private constructor(
                     lifecycleObserver = LifecycleObserver(
                         onForeground = { handleForeground() },
                         onBackground = { handleBackground() },
+                        log = log,
                     )
                     _initialized = true
                 }
@@ -448,7 +454,7 @@ internal class SharedFeatureflipCore private constructor(
             try {
                 inspector(event)
             } catch (e: Exception) {
-                System.err.println("[featureflip] evaluation inspector threw: $e")
+                log.error("[featureflip] evaluation inspector threw: $e")
             }
         }
     }
@@ -481,7 +487,7 @@ internal class SharedFeatureflipCore private constructor(
         try {
             recorder.record(key, flag?.variation, currentUserId)
         } catch (e: Exception) {
-            System.err.println("[featureflip] read recording threw: $e")
+            log.error("[featureflip] read recording threw: $e")
         }
     }
 
@@ -630,6 +636,7 @@ internal class SharedFeatureflipCore private constructor(
                 onStreamRecovered = { stopFallbackPolling() },
                 userAgent = httpClient.userAgent,
                 generation = contextGeneration,
+                log = log,
             )
             source.start()
             streamingDataSource = source
@@ -650,6 +657,7 @@ internal class SharedFeatureflipCore private constructor(
             intervalMs = config.pollIntervalMs,
             onChange = { flags, requestedFor -> applyFullSnapshot(flags, requestedFor) },
             generation = contextGeneration,
+            log = log,
         )
         source.start()
         pollingDataSource = source
@@ -790,7 +798,7 @@ internal class SharedFeatureflipCore private constructor(
             try {
                 listener.onUpdate(delivered)
             } catch (e: Exception) {
-                System.err.println("[featureflip] flag update listener threw: $e")
+                log.error("[featureflip] flag update listener threw: $e")
             }
         }
     }
@@ -868,7 +876,7 @@ internal class SharedFeatureflipCore private constructor(
                 config.clientKey,
                 callFactory,
                 reportsEvaluations = config.sendEvaluationEvents,
-                userAgent = SdkIdentity.userAgent(config.wrapperName, config.wrapperVersion),
+                userAgent = SdkIdentity.userAgent(config.wrapperName, config.wrapperVersion, SdkLogger(config.clientKey)),
             )
             val cache = FlagCache(config.clientKey)
             val store = anonymousKeyStore

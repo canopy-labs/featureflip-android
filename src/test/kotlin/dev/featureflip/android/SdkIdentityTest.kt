@@ -127,7 +127,7 @@ class SdkIdentityTest {
 
     @Test
     fun `wrapper without a version is sent as a bare name`() {
-        assertThat(SdkIdentity.userAgent("my-wrapper", null)).isEqualTo("$sdkToken my-wrapper")
+        assertThat(SdkIdentity.userAgent("my-wrapper", null, SdkLogger())).isEqualTo("$sdkToken my-wrapper")
     }
 
     @Test
@@ -135,7 +135,7 @@ class SdkIdentityTest {
         // A space is not a legal product-token character, and OkHttp would send it inside
         // the header value regardless. Identity metadata must never stop the client
         // starting, so it is dropped and said so.
-        val err = captureStderr { assertThat(SdkIdentity.userAgent("bad name", "1.0")).isEqualTo(sdkToken) }
+        val err = captureStderr { assertThat(SdkIdentity.userAgent("bad name", "1.0", SdkLogger())).isEqualTo(sdkToken) }
 
         assertThat(err).contains("bad name")
     }

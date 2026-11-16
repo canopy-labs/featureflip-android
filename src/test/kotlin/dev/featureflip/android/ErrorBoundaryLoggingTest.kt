@@ -48,6 +48,7 @@ class ErrorBoundaryLoggingTest {
                 context = mapOf("user_id" to "u1"),
                 intervalMs = 60_000,
                 onChange = { _, _ -> },
+                log = SdkLogger(),
             )
             server.enqueue(MockResponse.Builder().body("""{"flags":{}}""").build())
             poller.pollOnce()
@@ -187,6 +188,7 @@ class ErrorBoundaryLoggingTest {
                 context = mapOf("user_id" to "u1"),
                 intervalMs = 60_000,
                 onChange = { _, _ -> },
+                log = SdkLogger(),
             )
             server.enqueue(MockResponse.Builder().body("{not json").build())
             poller.pollOnce()

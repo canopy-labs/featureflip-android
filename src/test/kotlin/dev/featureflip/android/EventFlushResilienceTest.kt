@@ -58,6 +58,7 @@ class EventFlushResilienceTest {
             flushIntervalMs = 60_000,
             batchSize = batchSize,
             maxBufferSize = maxBufferSize,
+            log = SdkLogger(),
         )
 
     @Test

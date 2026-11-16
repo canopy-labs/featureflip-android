@@ -22,11 +22,11 @@ internal object SdkIdentity {
      * a valid product token is dropped with a warning rather than thrown, because identity
      * metadata must never stop the client starting.
      */
-    fun userAgent(wrapperName: String?, wrapperVersion: String?): String {
+    fun userAgent(wrapperName: String?, wrapperVersion: String?, log: SdkLogger): String {
         if (wrapperName.isNullOrEmpty()) return DEFAULT
         val valid = TOKEN.matches(wrapperName) && (wrapperVersion == null || TOKEN.matches(wrapperVersion))
         if (!valid) {
-            System.err.println(
+            log.error(
                 "[featureflip] Ignoring wrapper '$wrapperName/$wrapperVersion': not a valid User-Agent product token.",
             )
             return DEFAULT

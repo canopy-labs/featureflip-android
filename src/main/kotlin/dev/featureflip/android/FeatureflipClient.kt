@@ -260,7 +260,7 @@ class FeatureflipClient private constructor(
                 if (existing != null) {
                     if (existing.tryAcquire()) {
                         if (!configsEqual(existing.config, config)) {
-                            System.err.println(
+                            SdkLogger(config.clientKey).error(
                                 "[featureflip] FeatureflipClient.get called with different " +
                                     "options for client key already in use. The cached instance's " +
                                     "options are preserved; the passed options are ignored.",

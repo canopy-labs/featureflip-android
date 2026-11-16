@@ -16,6 +16,7 @@ internal class PollingDataSource(
     private val onChange: (Map<String, FlagValue>, Long) -> Unit,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
     generation: Long = 0L,
+    private val log: SdkLogger,
 ) {
     private val lock = ReentrantLock()
     private var context: Map<String, Any?> = context
@@ -87,7 +88,7 @@ internal class PollingDataSource(
             val kind = if (e.message?.startsWith("HTTP ") == true) e.message else e.javaClass.name
             if (kind != lastLoggedFailure) {
                 lastLoggedFailure = kind
-                System.err.println("[featureflip] poll failed, will retry in ${intervalMs}ms: $e")
+                log.error("[featureflip] poll failed, will retry in ${intervalMs}ms: $e")
             }
         }
     }

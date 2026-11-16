@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "io.featureflip"
-version = "3.5.4"
+version = "3.5.5"
 
 java {
     toolchain {
@@ -24,8 +24,8 @@ repositories {
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("com.squareup.okhttp3:okhttp-sse:5.5.1")
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.22.4")
-    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.22.4")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.23.0")
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.23.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
 
     // Note: androidx.lifecycle is accessed via reflection at runtime when available.

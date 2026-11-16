@@ -44,6 +44,7 @@ internal class StreamingDataSource(
     // shares nothing with HttpClient; the core passes the same value to both.
     private val userAgent: String = SdkIdentity.DEFAULT,
     generation: Long = 0L,
+    private val log: SdkLogger = SdkLogger(clientKey),
 ) {
     internal data class SSEEvent(val eventType: String, val data: String)
 
@@ -264,7 +265,7 @@ internal class StreamingDataSource(
     private fun logStreamFailure(kind: String, message: String) {
         if (kind == lastLoggedFailure) return
         lastLoggedFailure = kind
-        System.err.println("[featureflip] $message")
+        log.error("[featureflip] $message")
     }
 
     private fun connect(runEpoch: Long) {
@@ -370,7 +371,7 @@ internal class StreamingDataSource(
                     if (runEpoch == epoch) connectionId = data["connectionId"]
                 }
             } catch (e: Exception) {
-                System.err.println("[featureflip] ignoring unparseable connection-ready event: $e")
+                log.error("[featureflip] ignoring unparseable connection-ready event: $e")
             }
             return
         }
@@ -388,7 +389,7 @@ internal class StreamingDataSource(
             }
         } catch (e: Exception) {
             // The store keeps its last-known-good flags; say so rather than drop it.
-            System.err.println("[featureflip] ignoring unparseable flags-updated event: $e")
+            log.error("[featureflip] ignoring unparseable flags-updated event: $e")
         }
     }
 }

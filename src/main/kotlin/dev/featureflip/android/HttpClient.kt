@@ -3,13 +3,18 @@ package dev.featureflip.android
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLException
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.IOException
-import java.util.concurrent.TimeUnit
 
 /**
  * HTTP client for evaluation API requests.
@@ -82,13 +87,58 @@ internal class HttpClient(
             .post(requestBody)
             .build()
 
-        callFactory.newCall(request).execute().use { response ->
+        execute(callFactory, request).use { response ->
             if (!response.isSuccessful) {
                 // Typed rather than a bare IOException: the flush needs the status
                 // to decide whether keeping the batch could ever help (#2456).
                 throw EventSendException(response.code)
             }
         }
+    }
+
+    /**
+     * Runs a request, rethrowing a failure with the key removed. The exception comes from
+     * the caller's [Call.Factory] or its interceptors, and one that quotes the request
+     * headers would hand the Authorization value to whatever the host does with the
+     * exception (#5167). A clean exception passes through untouched. A dirty one (the key
+     * in its text, its cause chain or its suppressed exceptions) is replaced by one of the
+     * same common type, so retry classification and host `catch` blocks still work, with
+     * the stack trace kept and the cause dropped.
+     */
+    internal fun execute(factory: Call.Factory, request: Request): okhttp3.Response =
+        try {
+            factory.newCall(request).execute()
+        } catch (e: IOException) {
+            throw redactedFailure(e) ?: e
+        } catch (e: RuntimeException) {
+            throw redactedFailure(e) ?: e
+        }
+
+    private fun redactedFailure(e: Throwable): Throwable? {
+        val log = SdkLogger(clientKey)
+        if (!quotesKey(e, log, HashSet())) return null
+        val message = log.redact(e.toString().removePrefix(e.javaClass.name + ": "))
+        val replacement: Throwable = when (e) {
+            is SocketTimeoutException -> SocketTimeoutException(message)
+            is UnknownHostException -> UnknownHostException(message)
+            is ConnectException -> ConnectException(message)
+            is InterruptedIOException -> InterruptedIOException(message)
+            is SSLException -> SSLException(message)
+            is IOException -> IOException(message)
+            is IllegalStateException -> IllegalStateException(message)
+            is IllegalArgumentException -> IllegalArgumentException(message)
+            else -> RuntimeException(log.redact("${e.javaClass.name}: ${e.message}"))
+        }
+        replacement.stackTrace = e.stackTrace
+        return replacement
+    }
+
+    private fun quotesKey(t: Throwable, log: SdkLogger, seen: MutableSet<Throwable>): Boolean {
+        if (!seen.add(t)) return false
+        val text = t.toString()
+        if (log.redact(text) != text) return true
+        t.cause?.let { if (quotesKey(it, log, seen)) return true }
+        return t.suppressed.any { quotesKey(it, log, seen) }
     }
 
     private inline fun <reified T> post(
@@ -118,7 +168,7 @@ internal class HttpClient(
             callFactory
         }
 
-        client.newCall(request).execute().use { response ->
+        execute(client, request).use { response ->
             if (!response.isSuccessful) {
                 throw IOException("HTTP ${response.code}")
             }

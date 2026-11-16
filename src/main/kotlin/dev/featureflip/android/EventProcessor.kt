@@ -14,6 +14,7 @@ internal class EventProcessor(
     batchSize: Int,
     private val maxBufferSize: Int = DEFAULT_MAX_BUFFER_SIZE,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+    private val log: SdkLogger,
 ) {
     internal companion object {
         /**
@@ -188,7 +189,7 @@ internal class EventProcessor(
                 // malformed; both fail identically next time. Dropping shrinks the
                 // buffer, so the loop still ends, and moving on means one poison
                 // batch cannot block the backlog queued behind it.
-                System.err.println(
+                log.error(
                     "[featureflip] dropped ${batch.size} analytics event(s) the events endpoint rejected permanently: $e",
                 )
                 if (lock.withLock { closed }) return
@@ -225,11 +226,11 @@ internal class EventProcessor(
         }
 
         if (dropped < 0) {
-            System.err.println(
+            log.error(
                 "[featureflip] dropped ${batch.size} analytics event(s): shutting down and will not flush again: $cause",
             )
         } else {
-            System.err.println(
+            log.error(
                 "[featureflip] failed to flush ${batch.size} analytics event(s); re-queued for the next flush " +
                     "($dropped dropped to stay within the buffer bound): $cause",
             )
@@ -247,7 +248,7 @@ internal class EventProcessor(
     }
 
     private fun reportOverflow(dropped: Int) {
-        System.err.println(
+        log.error(
             "[featureflip] event buffer is full; dropped $dropped of the oldest analytics event(s)",
         )
     }

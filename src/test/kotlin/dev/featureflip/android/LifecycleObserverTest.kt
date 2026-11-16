@@ -11,6 +11,7 @@ class LifecycleObserverTest {
         val observer = LifecycleObserver(
             onForeground = { called = true },
             onBackground = {},
+            log = SdkLogger(),
         )
 
         observer.simulateForeground()
@@ -23,6 +24,7 @@ class LifecycleObserverTest {
         val observer = LifecycleObserver(
             onForeground = {},
             onBackground = { called = true },
+            log = SdkLogger(),
         )
 
         observer.simulateBackground()
@@ -36,6 +38,7 @@ class LifecycleObserverTest {
         val observer = LifecycleObserver(
             onForeground = { foreground++; error("foreground boom") },
             onBackground = { background++; error("background boom") },
+            log = SdkLogger(),
         )
 
         observer.simulateForeground()
@@ -52,6 +55,7 @@ class LifecycleObserverTest {
         val observer = LifecycleObserver(
             onForeground = {},
             onBackground = {},
+            log = SdkLogger(),
         )
         observer.remove() // Should not throw
     }

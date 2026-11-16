@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.5.5 — 2026-11-16
+
+### Security
+
+- The SDK key is now redacted from every line the SDK writes to `System.err`, including error messages from the HTTP stack, and from the `IOException` a failed request throws. A `Call.Factory` or interceptor whose exception quotes the `Authorization` header used to hand the key to the host's logs and crash reporters. (#5167)
+
 ## 3.5.4 — 2026-11-03
 
 ### Fixed

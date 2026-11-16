@@ -78,6 +78,7 @@ class EventFlushCoalescingTest {
         flushIntervalMs = 3_600_000,
         batchSize = 1,
         maxBufferSize = 1000,
+        log = SdkLogger(),
     )
 
     @Test

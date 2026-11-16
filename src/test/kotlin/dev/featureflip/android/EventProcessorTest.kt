@@ -32,7 +32,7 @@ class EventProcessorTest {
         server.enqueue(MockResponse.Builder().code(200).build())
 
         val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
-        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
+        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100, log = SdkLogger())
 
         processor.enqueue(
             SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
@@ -54,7 +54,7 @@ class EventProcessorTest {
     @Test
     fun `flush does nothing when buffer is empty`() {
         val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
-        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
+        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100, log = SdkLogger())
 
         processor.flush() // Should not throw or make requests
 
@@ -67,7 +67,7 @@ class EventProcessorTest {
         server.enqueue(MockResponse.Builder().code(200).build())
 
         val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
-        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
+        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100, log = SdkLogger())
 
         processor.enqueue(
             SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
@@ -93,7 +93,7 @@ class EventProcessorTest {
         val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
         // Use Unconfined dispatcher so the coroutine in enqueue runs synchronously
         val testScope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 2, scope = testScope)
+        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 2, scope = testScope, log = SdkLogger())
 
         processor.enqueue(
             SdkEvent(type = SdkEventType.Custom, flagKey = "test-event", userId = "user-1", timestamp = "2025-01-01T00:00:00Z"),
@@ -111,7 +111,7 @@ class EventProcessorTest {
     @Test
     fun `markClosed refuses further events without flushing`() {
         val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
-        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
+        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100, log = SdkLogger())
 
         // stop() marks closed inline, but posts the final batch inline too, so the
         // core hands it to a background scope (#2478). This is the cheap half, kept
@@ -130,7 +130,7 @@ class EventProcessorTest {
         server.enqueue(MockResponse.Builder().code(200).build())
 
         val httpClient = HttpClient(server.url("/").toString().trimEnd('/'), "test-key")
-        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100)
+        val processor = EventProcessor(httpClient, flushIntervalMs = 60_000, batchSize = 100, log = SdkLogger())
         processor.start()
 
         processor.enqueue(
@@ -153,6 +153,7 @@ class EventProcessorTest {
             flushIntervalMs = 60_000,
             batchSize = 100,
             scope = CoroutineScope(Dispatchers.IO + supervisor),
+            log = SdkLogger(),
         )
 
         processor.markClosed()

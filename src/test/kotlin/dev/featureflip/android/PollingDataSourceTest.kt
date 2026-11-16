@@ -41,6 +41,7 @@ class PollingDataSourceTest {
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
             onChange = { flags, _ -> received.add(flags) },
+            log = SdkLogger(),
         )
 
         poller.pollOnce()
@@ -61,6 +62,7 @@ class PollingDataSourceTest {
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
             onChange = { flags, _ -> received.add(flags) },
+            log = SdkLogger(),
         )
 
         poller.pollOnce() // Should not throw
@@ -81,6 +83,7 @@ class PollingDataSourceTest {
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
             onChange = { flags, _ -> received.add(flags) },
+            log = SdkLogger(),
         )
 
         poller.updateContext(mapOf("user_id" to "user-2"), generation = 1)
@@ -110,6 +113,7 @@ class PollingDataSourceTest {
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
             onChange = { flags, _ -> received.add(flags) },
+            log = SdkLogger(),
         )
 
         poller.stop()
@@ -137,6 +141,7 @@ class PollingDataSourceTest {
             intervalMs = 60_000,
             onChange = { _, generation -> tags.add(generation) },
             generation = 3,
+            log = SdkLogger(),
         )
 
         poller.pollOnce()
@@ -157,6 +162,7 @@ class PollingDataSourceTest {
             context = mapOf("user_id" to "user-1"),
             intervalMs = 60_000,
             onChange = { _, generation -> tags.add(generation) },
+            log = SdkLogger(),
         )
 
         poller.updateContext(mapOf("user_id" to "user-3"), generation = 2)

@@ -12,10 +12,11 @@ import java.lang.reflect.Proxy
 internal class LifecycleObserver(
     onForeground: () -> Unit,
     onBackground: () -> Unit,
+    log: SdkLogger,
 ) {
     // These run on the host app's main thread, where nothing catches an exception.
-    private val onForeground = contained("foreground", onForeground)
-    private val onBackground = contained("background", onBackground)
+    private val onForeground = contained("foreground", onForeground, log)
+    private val onBackground = contained("background", onBackground, log)
 
     // Written by the constructing thread and by remove(), read by a registration posted
     // to the main thread.
@@ -100,11 +101,11 @@ internal class LifecycleObserver(
     }
 }
 
-private fun contained(name: String, handler: () -> Unit): () -> Unit = {
+private fun contained(name: String, handler: () -> Unit, log: SdkLogger): () -> Unit = {
     try {
         handler()
     } catch (e: Exception) {
-        System.err.println("[featureflip] $name lifecycle handler threw: $e")
+        log.error("[featureflip] $name lifecycle handler threw: $e")
     }
 }
 
